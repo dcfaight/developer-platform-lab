@@ -29,6 +29,9 @@ do not expose them publicly.
    ```sh
    kind create cluster --name developer-platform-lab --config infra/kind/cluster.yaml
    kubectl --context kind-developer-platform-lab get nodes
+   kubectl --context kind-developer-platform-lab wait --for=condition=Ready nodes --all --timeout=180s
+   kubectl --context kind-developer-platform-lab -n kube-system \
+     rollout status deployment/coredns --timeout=180s
    ```
 
 3. In the terminal with the `DB_*` exports, configure an `OPERATOR` account (and,
@@ -41,6 +44,7 @@ do not expose them publicly.
 
    ```sh
    export WORKER_ENABLED=true
+   export PLATFORM_KUBERNETES_MODE=local-kind
    export PLATFORM_KUBERNETES_KUBECONFIG="$HOME/.kube/config"
    cd backend
    ./mvnw spring-boot:run
@@ -59,6 +63,8 @@ do not expose them publicly.
    Open http://127.0.0.1:5173. Vite proxies `/api` to the backend.
    The sample is the worker's fixed `nginxinc/nginx-unprivileged:1.28-alpine`
    Deployment; no custom sample build or image load is needed.
+   If node/DNS readiness fails, fix cluster networking/resources before continuing;
+   do not disable workload probes. Registry access is needed for a cold sample pull.
 
 ## 1. Create from the portal
 

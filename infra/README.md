@@ -17,7 +17,7 @@ kind delete cluster --name developer-platform-lab
 ```
 
 The backend worker builds the approved namespace and sample Deployment manifest
-in its Kubernetes package. The separate [K3s packaging](#local-k3s-platform-api-only)
+in its Kubernetes package. The separate [K3s packaging](#local-k3s-platform)
 in `kubernetes/` deploys the platform itself, not those sample workloads.
 There is no arbitrary manifest or image input.
 
@@ -161,8 +161,8 @@ trusted-loopback HTTP only and is not extended to this TLS endpoint in this slic
   Rotate password hashes by recreating the backend. There is no certificate
   renewal, SSO, external secrets, rate limiting, read authorization, per-owner
   RBAC, multi-tenant isolation, database transport TLS, or worker service-account
-  design here. The separate K3s packaging below does not enable worker access
-  either; narrowly scoped worker RBAC must be designed before enabling it.
+  design in Compose. The separate K3s packaging below uses an explicit in-cluster
+  worker identity; this does not enable provisioning in the Compose deployment.
 - Stop with `docker compose -f compose.deploy.yaml down`; this retains the
   database volume. `down --volumes` permanently deletes deployment history:
   use only for disposable tests after confirming the project name.
@@ -185,7 +185,7 @@ and missing-setting failures. Backend tests separately verify database-loss
 readiness versus liveness. A successful API probe does not prove kind provisioning,
 namespace deletion, backup recovery, certificate renewal or production readiness.
 
-## Local K3s platform (API-only)
+## Local K3s platform
 
 `kubernetes/` is a first-pass Kustomize package for a **separate, single-node K3s**
 installation: one backend API, one frontend, PostgreSQL 18.6 with a 5Gi
@@ -194,11 +194,38 @@ a Traefik TLS Ingress. It reuses the existing Dockerfiles without changing Compo
 or the host-run kind workflow. The [baseline](../docs/pre-kubernetes.md) remains
 the roadmap, not evidence of completed lifecycle validation.
 
-**Boundary:** the `deploy` profile and explicit worker disablement make this
-API-only. Authenticated creates are persisted but remain pending; accepted
-deletions cannot complete. Do not connect the kind worker to this database, mount
-admin kubeconfig, or enable the worker in these manifests. In-cluster worker
-authentication/RBAC and end-to-end provisioning are later work.
+**Boundary:** unlike the API-only Compose deployment, this package explicitly
+overrides the `deploy` profile with `PLATFORM_WORKER_ENABLED=true` and
+`PLATFORM_KUBERNETES_MODE=in-cluster`. The worker runs inside the backend and
+provisions sample namespaces in this same disposable cluster. No admin kubeconfig
+is mounted; the host-kind workflow and Compose deployment remain unchanged.
+Applying this version starts processing **existing pending operations** in its
+database as well as new requests. Review the backlog before upgrading.
+
+`worker-rbac.yaml` grants the dedicated `platform-worker` ServiceAccount only
+namespace `get/create/delete` and Deployment `get/create/update`. Dynamic
+namespaces require cluster-wide grants; Kubernetes RBAC cannot constrain these
+grants by ownership labels or an `env-` name prefix. Application ownership checks
+are not a security boundary against stolen worker credentials: a compromised
+backend could delete unrelated namespaces (including `platform-lab` or
+`kube-system`) or create/modify Deployments elsewhere.
+Use only a dedicated disposable lab cluster, not a shared or production cluster.
+There is no Secrets, pod exec, RBAC-management, wildcard, or cluster-admin grant.
+
+Automatic service-account mounts stay disabled for every component. Only the
+backend mounts an explicit read-only projection at
+`/var/run/secrets/platform-worker`, containing the namespace's `kube-root-ca.crt`
+and an API-audience token with a requested one-hour lifetime. Kubelet rotates the
+token; the client reloads it instead of caching startup credentials. The client
+uses only `https://kubernetes.default.svc:443`, verifies CA and hostname, ignores
+ambient kubeconfig/proxies, and does not follow redirects. The backend UID/GID
+10001 reads the group-readable projection via `fsGroup`.
+
+For an intentional API-only K3s run, set `PLATFORM_WORKER_ENABLED` to `"false"`
+in `backend.yaml` before applying; accepted creates then remain
+`REQUESTED` / `PENDING`. Do not run lifecycle checks in that mode. To remove
+unused worker privileges too, remove its projected mount/volume,
+`serviceAccountName`, and RBAC resource from the package.
 
 ### Prerequisites and images
 
@@ -213,9 +240,9 @@ export K3S_CONTEXT=your-k3s-context
 kubectl --context "$K3S_CONTEXT" get nodes
 kubectl --context "$K3S_CONTEXT" get storageclass local-path
 kubectl --context "$K3S_CONTEXT" get ingressclass traefik
-docker build -t platform-lab-backend:k3s-v1 ./backend
+docker build -t platform-lab-backend:k3s-v2 ./backend
 docker build -t platform-lab-frontend:k3s-v1 ./frontend
-docker save platform-lab-backend:k3s-v1 platform-lab-frontend:k3s-v1 \
+docker save platform-lab-backend:k3s-v2 platform-lab-frontend:k3s-v1 \
   -o /tmp/platform-lab-images.tar
 # Run on the K3s node (copy the archive there first if building elsewhere):
 sudo k3s ctr images import /tmp/platform-lab-images.tar
@@ -228,6 +255,17 @@ the node or pods fail with `ErrImageNeverPull`. PostgreSQL is pulled from Docker
 Hub. For updates, build/import a new tag and update `images` in
 `infra/kubernetes/kustomization.yaml` before reapplying; do not silently reuse tags.
 Registry distribution and multi-node scheduling are not provided.
+
+Verify nodes and CoreDNS are healthy, pod networking and kubelet HTTP probes work,
+and the node can pull `nginxinc/nginx-unprivileged:1.28-alpine` (or preload that
+exact image). Each sample requests 50m CPU/32Mi memory, with 250m/128Mi limits.
+The Kubernetes API must be reachable from the backend through cluster DNS and
+the `kubernetes` Service. Standard projected service-account tokens and the
+namespace CA ConfigMap must be available. The worker does not create sample
+Services or Ingresses; use a loopback Deployment port-forward to view the sample.
+If the backend is stuck mounting credentials, check that `kube-root-ca.crt` exists
+in `platform-lab` and inspect Pod events; it is normally published by the cluster's
+root-CA controller.
 
 ### Secrets and TLS
 
@@ -329,9 +367,54 @@ Sign in with the operator's **plaintext** password, not its hash.
 
 The offline check is `python3 -m unittest discover -s automation/tests -p
 test_kubernetes.py -v` (on one line); it renders manifests when kubectl is present.
-Live checks are opt-in and read-only: they verify availability, a bound PVC,
-worker disablement, UI/API routing and private management paths. They do not
-prove ingress/TLS, worker lifecycle, restart persistence, or recovery.
+Live smoke checks are opt-in and read-only: they verify availability, a bound PVC,
+explicit worker configuration, required/denied RBAC permissions, UI/API routing,
+and private management paths. The selected kubectl identity needs impersonation
+permission to run the `auth can-i --as` checks. They do not prove ingress/TLS,
+worker lifecycle, restart persistence, or recovery.
+
+### Authenticated end-to-end lifecycle check
+
+Use only the disposable cluster and an already configured OPERATOR account.
+Choose a trusted HTTPS origin that routes to this deployment, either ingress or
+the frontend TLS port-forward above. For the port-forward example,
+`platform.localhost` must resolve to `127.0.0.1` on the testing host. Do not use
+`--insecure`, plaintext remote HTTP, or a password hash as the login password.
+
+```sh
+export PLATFORM_K3S_CONTEXT="$K3S_CONTEXT"
+export PLATFORM_K3S_API_URL=https://platform.localhost:8443
+export PLATFORM_K3S_CA_FILE="$TLS_DIR/tls.crt"
+export PLATFORM_K3S_OPERATOR_USERNAME=alice
+read -r -s -p 'Operator plaintext password: ' PLATFORM_K3S_OPERATOR_PASSWORD; echo
+export PLATFORM_K3S_OPERATOR_PASSWORD
+PLATFORM_K3S_LIFECYCLE_TEST=true \
+  python3 -m unittest discover -s automation/tests -p test_kubernetes.py -v
+unset PLATFORM_K3S_OPERATOR_PASSWORD
+```
+
+This separate opt-in **mutates** the deployment: it verifies anonymous rejection,
+authenticated acceptance, idempotent replay, bounded operation polling, observed
+Deployment readiness, namespace ownership markers, durable two-operation history,
+API-driven deletion, and actual namespace absence. The test waits up to seven
+minutes per operation, does not follow redirects or ambient proxies, and retains
+database history. It attempts API cleanup on failure when the environment state
+allows it; pending/provisioning failures may leave resources for diagnosis.
+Never remove finalizers or bypass ownership checks to make a test pass.
+No successful run is implied by adding this check; record actual results.
+
+### Concise local status report
+
+Record the cluster/context, image tags, observation time, and exact checks run.
+Summarize separately: available platform Deployments/PVC, TLS and UI/API routing,
+authentication/persistence/replay, worker configuration, and lifecycle results.
+Use environment detail and operation GETs for current state, attempts, progress,
+and sanitized failures, not the original POST/replay response. Portal counts cover
+only the loaded page; health readiness checks PostgreSQL, not worker progress.
+For API-only runs, report `REQUESTED` / `PENDING` and zero attempts as expected,
+not as provisioning success. Mark skipped/unrun checks explicitly; availability
+alone does not prove workload readiness, deletion, persistence after restart, or
+backup recovery.
 
 ### Persistence, startup, and remaining work
 
@@ -353,11 +436,12 @@ prove ingress/TLS, worker lifecycle, restart persistence, or recovery.
   before restarting consumers. Back up before image/schema upgrades; migration
   rollback is not assured.
 - App pods run non-root with read-only roots, bounded memory-backed `/tmp`,
-  dropped capabilities, seccomp, resource requests/limits and no service-account
-  token. PostgreSQL retains its image's initialization privileges. These are
+  dropped capabilities, seccomp, resource requests/limits and no automatic
+  service-account token. Only the backend receives the explicit worker projection.
+  PostgreSQL retains its image's initialization privileges. These are
   useful defaults, not validated production hardening.
-- **TODO:** test backup/restore and restart persistence on K3s; implement in-cluster
-  worker client/authentication/RBAC without weakening ownership/deletion guards;
+- **TODO:** test backup/restore and restart persistence on K3s; run and record
+  authenticated lifecycle checks on the target K3s installation;
   add network policies, database role separation, secret encryption/rotation,
   certificate renewal and access review; validate the full environment lifecycle.
   No expiration scheduler or cleanup-CLI TLS extension is included.
