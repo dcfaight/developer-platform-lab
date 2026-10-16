@@ -1,7 +1,7 @@
 # Local demo: request → provision → observe
 
-**Story:** the API durably accepts a request, a leased worker provisions the
-approved sample in kind, and the read-only portal shows recorded progress.
+**Story:** the portal submits a request through the API, a leased worker provisions
+the approved sample in kind, and the portal shows the persisted operation progress.
 Acceptance is not readiness; `READY` means initial Deployment readiness was observed,
 not that the application is continuously monitored.
 
@@ -46,7 +46,31 @@ No authentication is implemented; do not expose these services publicly.
    The sample is the worker's fixed `nginxinc/nginx-unprivileged:1.28-alpine`
    Deployment; no custom sample build or image load is needed.
 
-## 1. Request and safely replay
+## 1. Create from the portal
+
+1. Open http://127.0.0.1:5173 and choose **Create environment**.
+2. Enter a name using ASCII letters, digits, spaces, underscores, or hyphens,
+   starting with a letter or digit. Choose a whole-number lifetime from 1 to 24
+   hours; it defaults to 8. The only template is the approved `sample-service`.
+3. Submit once. The portal posts through Vite's same-origin `/api` proxy and,
+   after `202 Accepted`, opens the environment detail and operation history using
+   the returned environment ID.
+
+The initial state is `REQUESTED` / `PENDING`; acceptance is not readiness.
+With the worker disabled it remains pending. Enable the optional worker and kind
+cluster to watch the existing detail view refresh with persisted progress. TTL is
+metadata only and does not trigger cleanup.
+
+If the result is ambiguous, use **Retry the same request**. The portal retains
+the exact payload and idempotency key in this tab's session storage. An explicit
+new-request confirmation abandons that retry choice but cannot cancel server work
+or guarantee that the earlier environment was not created. Closing the tab or
+browser storage being unavailable can remove local recovery state.
+
+## 2. Exercise API idempotency replay
+
+The following optional API walkthrough creates a separate request, demonstrating
+the durable replay contract independently of the portal submission.
 
 Run the following in a **new Bash terminal**; keep it open for the observe step.
 `set -euo pipefail` stops this shell on a failed command rather than continuing
@@ -83,9 +107,9 @@ IDs; replay has the same IDs/body and `diff` prints nothing. Each new run genera
 a new key and creates one more environment; reuse the saved key/body to replay
 instead. A different body with the same key returns `409`, not a new environment.
 
-## 2. Observe with a bounded wait
+## 3. Observe with a bounded wait
 
-In the **same Bash terminal**, poll the operation for up to seven minutes.
+For the API-created request, in the **same Bash terminal**, poll the operation for up to seven minutes.
 Cold image pulls can take several minutes. The wait is diagnostic: timing out
 does not cancel work or delete anything.
 
@@ -142,8 +166,8 @@ kubectl --context kind-developer-platform-lab -n "$NAMESPACE" \
 | Provisioning times out / image pull stalls | Inspect `kubectl --context kind-developer-platform-lab -n "$NAMESPACE" describe pods` and operation events; check Docker resources/network access. Failed operations are terminal; fix the cause and use a new request key. |
 | Refresh fails after data loaded | The portal retains and labels last-loaded data. Restore the backend and use **Try again**; do not narrate stale status as live health. |
 
-For an API-only walkthrough, omit kind and leave the worker disabled: demonstrate
-durable `REQUESTED` / `PENDING`, replay, and portal reads. **Do not claim that
+For a portal/API-only walkthrough, omit kind and leave the worker disabled:
+demonstrate durable `REQUESTED` / `PENDING`, safe replay, and portal reads. **Do not claim that
 resources were provisioned.** Restarting the backend with the worker enabled
 later processes pending work. Never use a shared cluster for failure injection.
 

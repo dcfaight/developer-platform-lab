@@ -1,6 +1,6 @@
 # Frontend
 
-Read-only React + TypeScript + Vite environment status portal. Requires Node.js
+React + TypeScript + Vite environment creation and status portal. Requires Node.js
 24 and npm 11. This is a work-in-progress portfolio platform, not production software.
 
 From this directory:
@@ -31,11 +31,22 @@ http://127.0.0.1:8080. No CORS changes or frontend credentials are needed.
   10 seconds after a request finishes; Refresh retries immediately. A failed
   refresh retains and labels the last loaded data. Navigation cancels obsolete
   requests. All displayed times use the browser's local timezone.
+- Create requests for the fixed `sample-service` template with a validated name
+  and 1–24-hour lifetime. A successful `202` navigates to the returned
+  environment's existing detail and operation history; acceptance is not readiness.
+- Ambiguous submissions retain the exact normalized payload and idempotency key
+  in tab-scoped session storage for explicit replay. Refreshing the same tab can
+  recover it; closing the tab or unavailable browser storage can lose that recovery
+  state. Starting a new request after an uncertain result requires explicit
+  confirmation and warns that the earlier request may already exist. This is not
+  cancellation and does not guarantee absence.
 
-Use the [local demo and troubleshooting guide](../docs/demo.md) or the backend's
-[manual API checks](../backend/README.md#manual-api-checks) to populate the portal.
-With the worker disabled the operation stays pending; enable the optional
-local-kind worker to demonstrate actual progress. The portal sends only GETs.
+The portal uses only the same-origin `/api` proxy and does not access Kubernetes
+credentials or accept arbitrary templates/images. Use the
+[local demo and troubleshooting guide](../docs/demo.md) or the backend's
+[manual API checks](../backend/README.md#manual-api-checks). With the worker
+disabled the operation stays pending; enable the optional local-kind worker to
+demonstrate actual progress.
 
 ## Validation
 
@@ -52,8 +63,8 @@ new dependencies are development-only testing tools.
 
 ## Current limitations
 
-No create/delete controls, authentication, filtering, push updates, log stream,
-or Kubernetes actions are exposed. Expiry is metadata, not automated cleanup.
+No deletion, authentication, filtering, push updates, log stream, or Kubernetes
+actions are exposed. Expiry is metadata, not automated cleanup.
 Only backend-sanitized summaries are available; messages render as text, not HTML.
 Polling and offset pagination are intended for a small local demo, not a large
 multi-user service. No consistent snapshot across separate HTTP requests is promised.
