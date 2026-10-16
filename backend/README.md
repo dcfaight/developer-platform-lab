@@ -13,7 +13,9 @@ and records durable progress and sanitized failures in operation detail.
 Acceptance remains `REQUESTED` / `PENDING`; only observed workload readiness
 permits `READY`. There is no deletion or expiration cleanup.
 Omitted or `null` TTL defaults to eight hours.
-The frontend remains a static scaffold and is not connected to this API.
+The [read-only frontend portal](../frontend/README.md) consumes environment
+list/detail reads and paginated operation history. Environment responses include
+a nullable latest-operation summary; existing operation detail fields are unchanged.
 
 ## Run locally
 

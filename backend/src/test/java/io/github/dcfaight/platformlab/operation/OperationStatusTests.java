@@ -16,6 +16,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -37,6 +38,7 @@ class OperationStatusTests {
     @LocalServerPort int port;
     @Autowired WorkerRepository worker;
     @Autowired ObjectMapper mapper;
+    @Autowired JdbcTemplate jdbc;
 
     @Test
     void statusContainsDurableFailureProgressEventsAndOriginalRequestCorrelation() throws Exception {
@@ -80,6 +82,60 @@ class OperationStatusTests {
             assertFalse(event.path("message").asText().isEmpty());
             assertFalse(event.path("createdAt").asText().isEmpty());
         }
+
+        String environmentId = status.path("environmentId").asText();
+        var history = get(client, "/api/v1/environments/" + environmentId + "/operations");
+        assertEquals(200, history.statusCode());
+        var page = mapper.readTree(history.body());
+        assertEquals(1, page.path("totalElements").asInt());
+        assertEquals(1, page.path("totalPages").asInt());
+        assertEquals(status, page.path("items").get(0));
+        var detail = mapper.readTree(get(client, "/api/v1/environments/" + environmentId).body());
+        assertEquals(id.toString(), detail.path("latestOperation").path("id").asText());
+        assertEquals("FAILED", detail.path("latestOperation").path("status").asText());
+        var list = mapper.readTree(get(client, "/api/v1/environments").body());
+        assertEquals(detail, list.path("items").get(0));
+
+        UUID newerId = UUID.randomUUID();
+        jdbc.update("""
+                INSERT INTO operations (id, environment_id, type, status, attempt_count,
+                    next_attempt_at, created_at, updated_at, progress_step)
+                VALUES (?, ?, 'CREATE_ENVIRONMENT', 'PENDING', 0, now(),
+                    now() + interval '1 second', now(), 'ACCEPTED')
+                """, newerId, UUID.fromString(environmentId));
+        var newest = mapper.readTree(get(client, "/api/v1/environments/" + environmentId
+                + "/operations?size=1").body());
+        assertEquals(2, newest.path("totalElements").asInt());
+        assertEquals(2, newest.path("totalPages").asInt());
+        assertEquals(newerId.toString(), newest.path("items").get(0).path("id").asText());
+        var older = mapper.readTree(get(client, "/api/v1/environments/" + environmentId
+                + "/operations?size=1&page=1").body());
+        assertEquals(id.toString(), older.path("items").get(0).path("id").asText());
+        detail = mapper.readTree(get(client, "/api/v1/environments/" + environmentId).body());
+        assertEquals(newerId.toString(), detail.path("latestOperation").path("id").asText());
+        assertEquals(0, mapper.readTree(get(client, "/api/v1/environments/" + environmentId
+                + "/operations?page=2&size=1").body()).path("items").size());
+
+        for (String query : new String[] {"page=-1", "page=1000001", "size=0", "size=101", "page=oops"}) {
+            assertEquals(400, get(client, "/api/v1/environments/" + environmentId + "/operations?" + query)
+                    .statusCode());
+        }
+        assertEquals(400, get(client, "/api/v1/environments/not-a-uuid/operations").statusCode());
+        assertEquals(404, get(client, "/api/v1/environments/" + UUID.randomUUID() + "/operations").statusCode());
+
+        var other = client.send(HttpRequest.newBuilder(url("/api/v1/environments"))
+                .header("Content-Type", "application/json").header("Idempotency-Key", "other-history")
+                .POST(HttpRequest.BodyPublishers.ofString("""
+                        {"name":"Other environment","templateId":"sample-service","ttlHours":1}
+                        """)).build(), HttpResponse.BodyHandlers.ofString());
+        String otherId = mapper.readTree(other.body()).path("environmentId").asText();
+        var otherHistory = mapper.readTree(get(client, "/api/v1/environments/" + otherId + "/operations").body());
+        assertEquals(1, otherHistory.path("totalElements").asInt());
+        assertEquals(otherId, otherHistory.path("items").get(0).path("environmentId").asText());
+    }
+
+    private HttpResponse<String> get(HttpClient client, String path) throws Exception {
+        return client.send(HttpRequest.newBuilder(url(path)).GET().build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private URI url(String path) {

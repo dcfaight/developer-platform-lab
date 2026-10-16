@@ -24,9 +24,6 @@ public class OperationController {
     public OperationResponse get(@PathVariable String id) {
         var record = operations.find(ApiIds.parse(id)).orElseThrow(() ->
                 new ApiException(HttpStatus.NOT_FOUND, "NOT_FOUND", "Operation not found."));
-        return new OperationResponse(record.id(), record.environmentId(), record.type(), record.status(),
-                record.attemptCount(), record.nextAttemptAt(), record.leaseExpiresAt(), record.startedAt(),
-                record.completedAt(), record.createdAt(), record.updatedAt(), record.failureCode(),
-                record.failureMessage(), record.progressStep(), record.correlationId(), operations.events(record.id()));
+        return operations.response(record);
     }
 }
