@@ -94,6 +94,7 @@ describe('portal', () => {
       expect((request.headers as Record<string, string>)['Idempotency-Key']).toBe('create-key-1')
       expect(screen.getByText('REQUESTED')).toBeTruthy()
       expect(screen.getAllByText('PENDING')).toHaveLength(2)
+      expect(window.sessionStorage.getItem('dpl.environment-creation.v1')).toBeNull()
     })
 
     it.each([

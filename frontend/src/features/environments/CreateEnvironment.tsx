@@ -81,22 +81,26 @@ function requestIdMessage(error: ApiError): string {
 }
 
 export function CreateEnvironment() {
-  const [intent, setIntent] = useState<CreationIntent | null>(readIntent)
-  const [name, setName] = useState(() => readIntent()?.payload.name ?? '')
-  const [ttlHours, setTtlHours] = useState(() => String(readIntent()?.payload.ttlHours ?? 8))
+  const [restoredIntent] = useState(readIntent)
+  const [intent, setIntent] = useState<CreationIntent | null>(restoredIntent)
+  const [name, setName] = useState(restoredIntent?.payload.name ?? '')
+  const [ttlHours, setTtlHours] = useState(String(restoredIntent?.payload.ttlHours ?? 8))
   const [submitting, setSubmitting] = useState(false)
-  const [uncertain, setUncertain] = useState(() => readIntent() !== null)
+  const [uncertain, setUncertain] = useState(restoredIntent !== null)
   const [startingNew, setStartingNew] = useState(false)
   const [priorMayExist, setPriorMayExist] = useState(false)
   const [storageUnavailable, setStorageUnavailable] = useState(false)
-  const [message, setMessage] = useState(() => readIntent()
+  const [message, setMessage] = useState(restoredIntent
     ? 'A previous request may already have been accepted. Retry it with the same request key, or explicitly start a new request.'
     : '')
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const submittingRef = useRef(false)
   const mountedRef = useRef(true)
 
-  useEffect(() => () => { mountedRef.current = false }, [])
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const locked = submitting || (!!intent && uncertain)
   const errorsFor = (field: string) => fieldErrors[field]
@@ -237,10 +241,13 @@ export function CreateEnvironment() {
       </div>
       <div className="form-field">
         <label htmlFor="environment-template">Approved template</label>
-        <select id="environment-template" name="templateId" value="sample-service" disabled>
+        <select id="environment-template" name="templateId" value="sample-service" disabled
+          aria-invalid={!!errorsFor('templateId')}
+          aria-describedby={errorsFor('templateId') ? 'template-error' : undefined}>
           <option value="sample-service">sample-service</option>
         </select>
         <small>Only the fixed, approved sample is available.</small>
+        {errorsFor('templateId') && <small className="field-error" id="template-error">{errorsFor('templateId')}</small>}
       </div>
       <div className="form-field">
         <label htmlFor="environment-ttl">Lifetime (hours)</label>
