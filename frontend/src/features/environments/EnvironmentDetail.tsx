@@ -30,6 +30,7 @@ function OperationCard({ item }: { item: Operation }) {
       <div className="wide"><dt>Request correlation</dt><dd><code>{item.correlationId ?? 'Not available'}</code></dd></div>
     </dl>
     <h4>Progress history</h4>
+    {item.events.length > 0 && <p className="muted">{item.events.length} recorded {item.events.length === 1 ? 'event' : 'events'} · Oldest first</p>}
     {item.events.length === 0 ? <p className="muted">No progress events yet. The operation may be waiting for a worker.</p>
       : <ol className="timeline">{item.events.map((event, index) => <li key={`${event.createdAt}-${index}`}>
         <div><strong>{event.type.replaceAll('_', ' ')}</strong><Timestamp value={event.createdAt} /></div>
@@ -50,7 +51,8 @@ function OperationHistory({ id }: { id: string }) {
     <p className="muted">Newest operation first. Progress reflects recorded worker steps, not a percentage estimate.</p>
     <ResourceState {...resource} hasData={!!resource.data} />
     {resource.data && <>
-      {resource.data.items.length === 0 ? <p className="empty">No operations on this page.</p>
+      {resource.data.items.length === 0 ? <p className="empty">{resource.data.totalElements
+        ? 'No operations on this page.' : 'No operations recorded for this environment yet.'}</p>
         : resource.data.items.map((item) => <OperationCard key={item.id} item={item} />)}
       <Pagination page={page} totalPages={resource.data.totalPages} onChange={setPage} label="Operation pages" />
     </>}

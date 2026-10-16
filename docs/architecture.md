@@ -18,5 +18,7 @@ separate request, operation/lease, worker, and Kubernetes packages.
 This is at-least-once processing, not distributed exactly-once execution.
 Lease expiry can overlap Kubernetes calls; ownership checks and optimistic
 concurrency make repeat execution safe. The lease token protects database writes,
-not the Kubernetes API. There is no deletion, periodic post-success health
-reconciliation, production RBAC, authentication expansion, or frontend API wiring.
+not the Kubernetes API. The read-only React portal consumes environment lists,
+details, and operation history through the Vite development proxy; it holds no
+Kubernetes credentials and makes no mutations. There is no deletion, periodic
+post-success health reconciliation, production RBAC, or authentication.
