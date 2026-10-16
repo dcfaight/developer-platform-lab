@@ -239,6 +239,7 @@ developer-platform-lab/
 │   ├── architecture.md
 │   ├── api.md
 │   ├── demo.md
+│   ├── pre-kubernetes.md
 │   ├── decisions/
 │   └── runbooks/
 ├── .github/workflows/
@@ -261,6 +262,10 @@ removes owned namespaces. Expiration cleanup requires invoking the dry-run-first
 Kubernetes is not required for API-only acceptance and reads.
 Area README files describe the current scope.
 `docs/decisions/` and `docs/runbooks/` are reserved for future operational documentation.
+
+See the [Kubernetes deployment baseline and roadmap](docs/pre-kubernetes.md)
+for what exists today, what is still missing, and how the current host-run kind
+workflow differs from the planned local K3s deployment.
 
 ## 8. Domain Model
 
