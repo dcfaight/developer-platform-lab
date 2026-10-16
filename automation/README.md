@@ -141,3 +141,31 @@ Tests use an injected UTC clock and controlled expired fixtures, never reduced
 production TTL validation or operator database edits. Local fake-HTTP/subprocess
 tests exercise the real CLI transport; they are not real backend/DB or kind proof.
 See the demo for a real-clock create → expire → dry-run → execute → observe flow.
+
+### Evidence and remaining gates for this change
+
+- **Python:** 64 stdlib behavioral tests passed, including actual subprocess CLI
+  requests to a local fake HTTP server; compileall passed.
+- **Real backend/DB:** Maven `verify` passed (88 tests reported, four opt-in kind
+  cases skipped). The real CLI → HTTP Spring backend → PostgreSQL fixture test
+  proved dry-run writes nothing and execute creates durable deletes only for
+  expired eligible fixtures. Row-lock race tests reject changed expiry/status.
+  These tests do not prove Kubernetes removal.
+- **Existing frontend:** lint, 73 tests and build passed; no new real-browser
+  verification was performed. Compose configuration validation passed.
+- **Real kind:** owned and legacy-owned namespace deletion/absence tests passed.
+  The separate provisioning-readiness test failed: sample HTTP probes timed out,
+  and CoreDNS was also unready. The remaining worker full-flow run was stopped
+  after that failure; it did not establish completed create-to-cleanup evidence.
+  Do not count deletion-only proof, interrupted work, or the earlier opt-in skips
+  as a successful expiration walkthrough. No probes/safeguards were weakened.
+- **Review/security:** a read-only safety review found no blocking defects, and
+  changed-file secret scans were clean. Final automated review/CodeQL validation
+  was blocked by the validation time limit, not passed.
+- **Hosted CI:** runs require maintainer approval (`action_required`); local
+  results are not a hosted-CI pass.
+
+Remaining gates: approved hosted CI, completed automated review/security scan,
+and a working local kind/browser walkthrough. Offset-page concurrency limitations,
+trusted-local-only access, and absent auth/authz/deployment hardening remain;
+passing tests alone do not establish production readiness.

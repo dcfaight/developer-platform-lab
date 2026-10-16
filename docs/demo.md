@@ -309,6 +309,10 @@ operator instructions to edit the database or weaken the 1–24-hour TTL validat
 
 ## Troubleshooting and presenter fallback
 
+Current cleanup-specific [verification evidence and remaining gates](../automation/README.md#evidence-and-remaining-gates-for-this-change)
+distinguish fake HTTP, real backend/PostgreSQL, browser, and kind results. The
+historical deletion evidence below is not a new expiration end-to-end pass.
+
 | Symptom | Check / expected behavior |
 |---|---|
 | Portal cannot load or gets a proxy error | Confirm PostgreSQL and Spring Boot started, then `curl --fail http://127.0.0.1:8080/api/v1/environments`. Use the Vite dev server, not preview alone. |
