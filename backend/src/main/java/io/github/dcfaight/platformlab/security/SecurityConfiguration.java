@@ -57,6 +57,9 @@ public class SecurityConfiguration {
                 response, HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "Valid credentials are required for this operation.");
         AccessDeniedHandler forbidden = (request, response, exception) -> write(mapper, request, response,
                 HttpStatus.FORBIDDEN, "FORBIDDEN", "The authenticated user is not permitted to perform this operation.");
+        // CSRF protection is unnecessary: no session or cookie exists, credentials are only
+        // sent as an explicit Authorization header, and 401 omits WWW-Authenticate so browsers
+        // never cache Basic credentials to attach ambiently to cross-site requests.
         return http
                 .csrf(AbstractHttpConfigurer::disable)
                 .cors(AbstractHttpConfigurer::disable)

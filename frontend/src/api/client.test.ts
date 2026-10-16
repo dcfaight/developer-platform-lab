@@ -197,6 +197,12 @@ describe('operator credentials', () => {
     expect(window.localStorage.length).toBe(0)
   })
 
+  it('accepts the configured spelling of a case-insensitively matched account', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ username: 'alice', roles: ['OPERATOR'] })))
+    expect(await signIn('Alice', 'test-only-alice-pass')).toEqual({ username: 'alice', roles: ['OPERATOR'] })
+    expect(getSession()?.identity.username).toBe('alice')
+  })
+
   it('rejects invalid input, wrong credentials, and mismatched identities without a session', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(json({ code: 'UNAUTHENTICATED', requestId: 'request-401' }, 401))

@@ -266,8 +266,10 @@ export async function signIn(username: string, password: string): Promise<Identi
   try {
     const body = object(await response.json())
     const roles = array(body.roles, text)
-    if (text(body.username) !== username) throw new Error('Unexpected identity')
-    identity = { username, roles }
+    const confirmed = text(body.username)
+    // Account lookup ignores case; keep the configured spelling the audit log records.
+    if (confirmed.toLowerCase() !== username.toLowerCase()) throw new Error('Unexpected identity')
+    identity = { username: confirmed, roles }
   } catch {
     throw new ApiError('The API returned an unexpected sign-in response.', requestId)
   }
