@@ -1,10 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EnvironmentDetail } from './EnvironmentDetail'
 import { REFRESH_INTERVAL } from '../../api/useResource'
 import type { Environment } from '../../api/client'
-import { demoEnvironment, demoOperation, json, paged } from '../../test/fixtures'
+import { setSession } from '../../api/session'
+import { demoEnvironment, demoOperation, json, operatorSession, paged } from '../../test/fixtures'
 
 const ready: Environment = { ...demoEnvironment, status: 'READY',
   latestOperation: { ...demoEnvironment.latestOperation!, status: 'SUCCEEDED' } }
@@ -25,9 +26,11 @@ afterAll(() => {
   if (originalClose) Object.defineProperty(HTMLDialogElement.prototype, 'close', originalClose)
   else Reflect.deleteProperty(HTMLDialogElement.prototype, 'close')
 })
+beforeEach(() => setSession(operatorSession))
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
+  setSession(null)
 })
 
 function portal(item = ready, remove: () => Promise<Response> = async () => json(acceptance, 202)) {
@@ -135,7 +138,7 @@ describe('safe environment deletion', () => {
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Delete environment' }).disabled).toBe(true)
     const deletion = fetchMock.mock.calls.find(([, init]) => init?.method === 'DELETE')!
     expect(deletion[1]?.body).toBeUndefined()
-    expect(deletion[1]?.headers).toEqual({ Accept: 'application/json' })
+    expect(deletion[1]?.headers).toEqual({ Accept: 'application/json', Authorization: operatorSession.authorization })
   })
 
   it('keeps polling after accepted refresh and aborts all timers on unmount', async () => {
@@ -204,5 +207,32 @@ describe('safe environment deletion', () => {
     expect(signal?.aborted).toBe(true)
     await act(async () => resolve(json(acceptance, 202)))
     expect(screen.queryByText(/Deletion accepted/)).toBeNull()
+  })
+})
+
+describe('deletion authorization', () => {
+  it('disables deletion until an operator is signed in', async () => {
+    setSession(null)
+    const fetchMock = portal()
+    render(<EnvironmentDetail id={ready.id} />)
+    const button = await screen.findByRole('button', { name: 'Delete environment' })
+    expect(button).toHaveProperty('disabled', true)
+    expect(screen.getByText(/Requires an OPERATOR sign-in/)).toBeTruthy()
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false)
+  })
+
+  it.each([
+    [401, /Sign in again/],
+    [403, /not permitted to delete environments/],
+  ])('explains HTTP %s rejection with its request ID', async (status, message) => {
+    portal(ready, async () => json({ code: status === 401 ? 'UNAUTHENTICATED' : 'FORBIDDEN',
+      message: '<b>untrusted</b>', requestId: `request-${status}` }, status))
+    render(<EnvironmentDetail id={ready.id} />)
+    await confirm()
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm deletion' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toMatch(message)
+    expect(alert.textContent).toContain(`request-${status}`)
+    expect(alert.textContent).not.toContain('untrusted')
   })
 })

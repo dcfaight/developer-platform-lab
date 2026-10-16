@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { ApiError, createEnvironment, type ApiFieldError, type CreateEnvironmentRequest } from '../../api/client'
+import { isOperator, useSession } from '../../api/session'
 
 const STORAGE_KEY = 'dpl.environment-creation.v1'
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _-]{0,62}$/
@@ -96,6 +97,8 @@ export function CreateEnvironment() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const submittingRef = useRef(false)
   const mountedRef = useRef(true)
+  const session = useSession()
+  const authorized = isOperator(session)
 
   useEffect(() => {
     mountedRef.current = true
@@ -121,7 +124,15 @@ export function CreateEnvironment() {
       const error = caught instanceof ApiError
         ? caught
         : new ApiError('The request could not be confirmed. The environment may have been accepted; retry the same request safely.', undefined, undefined, [], true)
-      if (error.code === 'IDEMPOTENCY_CONFLICT') {
+      if (error.code === 'UNAUTHENTICATED' || error.code === 'FORBIDDEN') {
+        // Rejected before processing: keep the same key so the request can be safely retried after sign-in.
+        persistIntent(activeIntent)
+        if (mountedRef.current) {
+          setIntent(activeIntent)
+          setUncertain(true)
+          setMessage(`${error.message}${requestIdMessage(error)}`)
+        }
+      } else if (error.code === 'IDEMPOTENCY_CONFLICT') {
         const conflict = { ...activeIntent, conflict: true }
         persistIntent(conflict)
         if (mountedRef.current) {
@@ -153,7 +164,7 @@ export function CreateEnvironment() {
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (submittingRef.current) return
+    if (submittingRef.current || !authorized) return
     if (intent) {
       if (!intent.conflict) void submit(intent)
       return
@@ -205,6 +216,11 @@ export function CreateEnvironment() {
     <p>Request a local environment using the approved sample service. Acceptance records a request; it does not mean the environment is ready.</p>
     <p className="muted">Lifetime is metadata only. Expired environments are not automatically deleted.</p>
 
+    {!authorized && <div className="notice" role="status">
+      {session
+        ? `Signed in as ${session.identity.username}, which cannot create environments. An OPERATOR account is required.`
+        : 'Sign in with an OPERATOR account above to create environments. Your entries are kept while you sign in.'}
+    </div>}
     {priorMayExist && <div className="notice" role="status">
       The earlier request was not cancelled and may already have created an environment. Starting a new request does not guarantee the earlier environment is absent.
     </div>}
@@ -219,7 +235,7 @@ export function CreateEnvironment() {
         ? 'This key conflicts with a different request. Retrying it cannot resolve the conflict.'
         : `Recoverable request: ${intent.payload.name}, ${intent.payload.ttlHours} hour${intent.payload.ttlHours === 1 ? '' : 's'}.`}
       </p>
-      {!intent.conflict && <button type="button" onClick={() => void submit(intent)} disabled={submitting}>
+      {!intent.conflict && <button type="button" onClick={() => void submit(intent)} disabled={submitting || !authorized}>
         Retry the same request
       </button>}
       <button type="button" onClick={startNewRequest} disabled={submitting}>
@@ -259,7 +275,7 @@ export function CreateEnvironment() {
         <small id="ttl-help">Enter a whole number from 1 to 24. This does not schedule cleanup.</small>
         {errorsFor('ttlHours') && <small className="field-error" id="ttl-error">{errorsFor('ttlHours')}</small>}
       </div>
-      <button type="submit" disabled={submitting || (!!intent && uncertain)}>
+      <button type="submit" disabled={submitting || (!!intent && uncertain) || !authorized}>
         {submitting ? 'Submitting…' : 'Create environment'}
       </button>
     </form>

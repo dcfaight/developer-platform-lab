@@ -1,3 +1,5 @@
+import { authorizationHeader, clearSession, setSession, type Identity } from './session'
+
 export interface OperationSummary {
   id: string
   type: string
@@ -226,6 +228,53 @@ function acceptedEnvironment(value: unknown): AcceptedEnvironment {
   }
 }
 
+function authorizationError(status: number, requestId: string | undefined, action: string): ApiError | undefined {
+  if (status === 401) {
+    clearSession()
+    return new ApiError(`Sign in again: the API did not accept your credentials, so the ${action} was not accepted.`,
+      requestId, 'UNAUTHENTICATED')
+  }
+  if (status === 403) {
+    return new ApiError(`Your account is not permitted to ${action === 'deletion' ? 'delete' : 'create'} environments. An OPERATOR account is required.`,
+      requestId, 'FORBIDDEN')
+  }
+  return undefined
+}
+
+function basicCredential(username: string, password: string): string {
+  const bytes = new TextEncoder().encode(`${username}:${password}`)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return `Basic ${btoa(binary)}`
+}
+
+export async function signIn(username: string, password: string): Promise<Identity> {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$/.test(username) || !password) {
+    throw new ApiError('Enter a valid username and password.')
+  }
+  const authorization = basicCredential(username, password)
+  let response: Response
+  try {
+    response = await fetch('/api/v1/me', { headers: { Accept: 'application/json', Authorization: authorization } })
+  } catch {
+    throw new ApiError('Cannot reach the API. Check that the backend is running and try again.')
+  }
+  const requestId = requestIdentifier(response.headers.get('X-Request-Id'))
+  if (response.status === 401) throw new ApiError('Sign-in failed. Check the username and password.', requestId, 'UNAUTHENTICATED')
+  if (!response.ok) throw new ApiError(`Sign-in could not be completed (HTTP ${response.status}).`, requestId)
+  let identity: Identity
+  try {
+    const body = object(await response.json())
+    const roles = array(body.roles, text)
+    if (text(body.username) !== username) throw new Error('Unexpected identity')
+    identity = { username, roles }
+  } catch {
+    throw new ApiError('The API returned an unexpected sign-in response.', requestId)
+  }
+  setSession({ identity, authorization })
+  return identity
+}
+
 export async function deleteEnvironment(id: string, signal?: AbortSignal): Promise<AcceptedDeletion> {
   const controller = new AbortController()
   const abort = () => controller.abort()
@@ -237,7 +286,7 @@ export async function deleteEnvironment(id: string, signal?: AbortSignal): Promi
     let response: Response
     try {
       response = await fetch(`/api/v1/environments/${encodeURIComponent(id)}`, {
-        method: 'DELETE', signal: controller.signal, headers: { Accept: 'application/json' },
+        method: 'DELETE', signal: controller.signal, headers: { Accept: 'application/json', ...authorizationHeader() },
       })
     } catch (error) {
       if (signal?.aborted) throw error
@@ -254,6 +303,8 @@ export async function deleteEnvironment(id: string, signal?: AbortSignal): Promi
       }
       requestId = requestIdentifier(body.requestId) ?? requestId
       const code = typeof body.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(body.code) ? body.code : undefined
+      const denied = authorizationError(response.status, requestId, 'deletion')
+      if (denied) throw denied
       throw new ApiError(response.status >= 500
         ? 'The server could not confirm deletion. It may have been accepted. Check the status or retry deletion for this same environment safely.'
         : `Deletion was rejected (HTTP ${response.status}). Refresh status before trying again.`,
@@ -300,6 +351,7 @@ export async function createEnvironment(
           Accept: 'application/json',
           'Content-Type': 'application/json',
           'Idempotency-Key': idempotencyKey,
+          ...authorizationHeader(),
         },
         body: JSON.stringify(request),
       })
@@ -321,6 +373,8 @@ export async function createEnvironment(
       const code = typeof body.code === 'string' ? body.code : undefined
       const requestId = requestIdentifier(body.requestId) ?? headerRequestId
       const errors = fieldErrors(body.fieldErrors)
+      const denied = authorizationError(response.status, requestId, 'request')
+      if (denied) throw denied
       if (response.status === 400 && code === 'VALIDATION_ERROR') {
         throw new ApiError('Some fields need attention.', requestId, code, errors)
       }

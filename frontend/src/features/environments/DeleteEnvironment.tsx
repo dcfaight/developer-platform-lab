@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { ApiError, deleteEnvironment } from '../../api/client'
 import type { AcceptedDeletion, Environment } from '../../api/client'
+import { isOperator, useSession } from '../../api/session'
 
 export function DeleteEnvironment({ item, unavailable, onRefresh }: {
   item: Environment
@@ -21,7 +22,8 @@ export function DeleteEnvironment({ item, unavailable, onRefresh }: {
     && !['PENDING', 'RUNNING'].includes(item.latestOperation?.status ?? '')
   const retryFailedDeletion = item.status === 'DELETE_FAILED'
     && item.latestOperation?.id === accepted?.operationId && item.latestOperation?.status === 'FAILED'
-  const disabled = unavailable || !eligible || busy || (!!accepted && !retryFailedDeletion)
+  const authorized = isOperator(useSession())
+  const disabled = unavailable || !eligible || !authorized || busy || (!!accepted && !retryFailedDeletion)
 
   useEffect(() => () => controller.current?.abort(), [])
   useEffect(() => {
@@ -70,6 +72,7 @@ export function DeleteEnvironment({ item, unavailable, onRefresh }: {
     <p id="delete-guidance" className="muted">
       Deletion removes this environment's resources and cannot be undone.
       {' '}Available only for READY, FAILED, or DELETE_FAILED environments with no pending or running operation.
+      {!authorized && ' Requires an OPERATOR sign-in.'}
     </p>
     {accepted && <p role="status" className="submission-status">
       Deletion accepted ({accepted.operationStatus}). This does not mean cleanup is complete.
