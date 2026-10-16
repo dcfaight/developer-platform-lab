@@ -2,7 +2,7 @@
 
 A hands-on internal developer platform for provisioning development environments, deploying a sample application, and understanding operational status through a self-service portal.
 
-> **Project status:** Persistent backend slice implemented: PostgreSQL-backed environment requests, durable idempotency, and environment/operation reads. The frontend remains a static scaffold. Provisioning, workers, deletion, and cleanup are not implemented.
+> **Project status:** Persistent requests now support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The frontend remains a static scaffold. Deletion, expiration cleanup, authentication, and production readiness are not implemented.
 >
 > Except where marked as available now, this README preserves the intended architecture and delivery blueprint, not a claim that the full platform is implemented.
 >
@@ -226,9 +226,10 @@ The directories above now have starter files or explicit placeholders.
 The backend base package is `io.github.dcfaight.platformlab`.
 The frontend renders a static page. The backend now requires PostgreSQL and
 implements persistent environment creation requests and environment/operation
-reads, with Flyway migrations and durable idempotency. Workers, cleanup,
-deletion, and the sample workload remain unimplemented; Kubernetes is not
-required for this slice. Area README files describe the current scope.
+reads, with Flyway migrations and durable idempotency. An opt-in worker provisions
+an approved sample workload only in the dedicated local kind cluster. Cleanup
+and deletion remain unimplemented; Kubernetes is not required for API-only use.
+Area README files describe the current scope.
 `docs/decisions/` and `docs/runbooks/` are reserved for future operational documentation.
 
 ## 8. Domain Model
@@ -313,8 +314,9 @@ The MVP uses an explicitly labeled local-development actor. This is not a substi
 All routes use the `/api/v1` prefix. This table preserves the target blueprint.
 Currently implemented: `POST /environments`, `GET /environments` (pagination
 only, no status filter), `GET /environments/{id}`, and `GET /operations/{id}`.
-Deletion and events routes are not implemented. The only current states are
-`REQUESTED` and `PENDING`; accepting a request does not provision resources.
+Deletion and environment events routes are not implemented. Operation detail
+includes durable progress events. Acceptance still returns `REQUESTED` / `PENDING`;
+only the worker can verify readiness and mark the environment `READY`.
 
 | Method | Route | Purpose |
 |---|---|---|
@@ -497,8 +499,9 @@ See [backend/README.md](backend/README.md#manual-api-checks) for copyable curl
 checks covering creation, normalized replay, conflicts, list/detail reads,
 errors, and restart persistence. No authentication or CORS is added; the audit
 actor is fixed to local development, never supplied by caller headers.
-See [infra/README.md](infra/README.md) for the optional kind cluster.
-There is no sample image or provisioning workflow yet.
+See [infra/README.md](infra/README.md) for the optional kind cluster and
+[backend/README.md](backend/README.md) to enable the provisioning worker.
+The approved sample uses a fixed public image, not a user-supplied manifest.
 
 Checks from the repository root (also run by CI):
 

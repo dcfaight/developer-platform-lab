@@ -105,7 +105,11 @@ class PlatformLabApplicationTests {
         ApiResponse operation = get("/api/v1/operations/" + operationId);
         assertEquals(200, operation.status());
         assertFields(operation.json(), "id", "environmentId", "type", "status", "attemptCount",
-                "nextAttemptAt", "leaseExpiresAt", "startedAt", "completedAt", "createdAt", "updatedAt");
+                "nextAttemptAt", "leaseExpiresAt", "startedAt", "completedAt", "createdAt", "updatedAt",
+                "failureCode", "failureMessage", "progressStep", "correlationId", "events");
+        assertEquals(created.header("X-Request-Id"), operation.json().path("correlationId").asText());
+        assertEquals("ACCEPTED", operation.json().path("progressStep").asText());
+        assertTrue(operation.json().path("events").isEmpty());
         assertEquals(operationId, operation.json().path("id").asText());
         assertEquals(environmentId, operation.json().path("environmentId").asText());
         assertEquals("CREATE_ENVIRONMENT", operation.json().path("type").asText());
