@@ -82,6 +82,8 @@ class KindWorkerFlowTests {
         assertEquals("CLAIMED", status.path("events").get(0).path("type").asText());
         assertEquals("SUCCEEDED", status.path("events").get(status.path("events").size() - 1)
                 .path("type").asText());
+        assertEquals(java.util.List.of("PROVISIONING_STARTED", "NAMESPACE_CREATED", "WORKLOAD_CREATED",
+                "PROVISIONED", "ENVIRONMENT_READY"), milestones(status));
 
         JsonNode environment = get(client, "/api/v1/environments/" + environmentId);
         System.out.println("KIND_HTTP_ENVIRONMENT " + environment);
@@ -107,11 +109,25 @@ class KindWorkerFlowTests {
         System.out.println("KIND_HTTP_DELETE_OPERATION " + status);
         assertEquals("SUCCEEDED", status.path("status").asText(), status::toString);
         assertEquals("DELETE_ENVIRONMENT", status.path("type").asText());
+        assertEquals(java.util.List.of("DELETION_STARTED", "NAMESPACE_DELETE_REQUESTED", "ENVIRONMENT_DELETED"),
+                milestones(status));
         assertEquals("DELETED", get(client, "/api/v1/environments/" + environmentId).path("status").asText());
         assertEquals(2, get(client, "/api/v1/environments/" + environmentId + "/operations")
                 .path("totalElements").asInt());
         assertEquals("SUCCEEDED", get(client, "/api/v1/operations/" + operationId).path("status").asText());
         KindNamespaceAssertions.assertAbsent(environment.path("namespace").asText());
+    }
+
+    private static java.util.List<String> milestones(JsonNode operation) {
+        // Readiness and deletion polls add a variable number of CLAIMED/WAITING events between milestones.
+        var codes = new java.util.ArrayList<String>();
+        operation.path("events").forEach(event -> {
+            String type = event.path("type").asText();
+            if ("PROGRESS".equals(type) || "PROVISIONED".equals(type) || "SUCCEEDED".equals(type)) {
+                codes.add(event.path("code").asText());
+            }
+        });
+        return codes;
     }
 
     private JsonNode get(HttpClient client, String path) throws Exception {

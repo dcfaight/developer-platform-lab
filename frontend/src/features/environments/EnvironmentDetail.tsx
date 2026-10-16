@@ -8,7 +8,18 @@ import { ResourceState } from '../../components/ResourceState'
 import { Status, Timestamp } from '../../components/Status'
 import { DeleteEnvironment } from './DeleteEnvironment'
 
+function elapsed(from: string, to: string | null) {
+  if (!to) return null
+  const millis = new Date(to).getTime() - new Date(from).getTime()
+  if (Number.isNaN(millis) || millis < 0) return null
+  const seconds = Math.round(millis / 1000)
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  return hours ? `${hours}h ${minutes}m` : minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`
+}
+
 function OperationCard({ item }: { item: Operation }) {
+  const duration = elapsed(item.createdAt, item.completedAt)
   return <article className="operation" aria-label={`Operation ${item.id}`}>
     <div className="section-heading">
       <div><h3>{item.type.replaceAll('_', ' ')}</h3><code>{item.id}</code></div>
@@ -22,6 +33,7 @@ function OperationCard({ item }: { item: Operation }) {
       <div><dt>Started</dt><dd><Timestamp value={item.startedAt} /></dd></div>
       <div><dt>Updated</dt><dd><Timestamp value={item.updatedAt} /></dd></div>
       <div><dt>Completed</dt><dd><Timestamp value={item.completedAt} /></dd></div>
+      {duration && <div><dt>Total duration</dt><dd>{duration}</dd></div>}
       {['PENDING', 'RUNNING'].includes(item.status) && <>
         <div><dt>Next attempt</dt><dd><Timestamp value={item.nextAttemptAt} /></dd></div>
         <div><dt>Lease expires</dt><dd><Timestamp value={item.leaseExpiresAt} /></dd></div>
@@ -32,7 +44,9 @@ function OperationCard({ item }: { item: Operation }) {
     {item.events.length > 0 && <p className="muted">{item.events.length} recorded {item.events.length === 1 ? 'event' : 'events'} · Oldest first</p>}
     {item.events.length === 0 ? <p className="muted">No progress events yet. The operation may be waiting for a worker.</p>
       : <ol className="timeline">{item.events.map((event, index) => <li key={`${event.createdAt}-${index}`}>
-        <div><strong>{event.type.replaceAll('_', ' ')}</strong><Timestamp value={event.createdAt} /></div>
+        <div><strong>{(event.type === 'PROGRESS' ? event.code : event.type).replaceAll('_', ' ')}</strong>
+          <Timestamp value={event.createdAt} />
+          {elapsed(item.createdAt, event.createdAt) && <small>+{elapsed(item.createdAt, event.createdAt)} after acceptance</small>}</div>
         <p>{event.message}</p><code>{event.code}</code>
         {event.correlationId && <small>Request: {event.correlationId}</small>}
       </li>)}</ol>}

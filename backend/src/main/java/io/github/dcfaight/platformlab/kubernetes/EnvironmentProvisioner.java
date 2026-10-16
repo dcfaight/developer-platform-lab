@@ -2,7 +2,6 @@ package io.github.dcfaight.platformlab.kubernetes;
 
 import io.github.dcfaight.platformlab.environment.EnvironmentRepository.EnvironmentRecord;
 import java.util.UUID;
-import java.util.function.BooleanSupplier;
 
 public interface EnvironmentProvisioner {
     void provision(EnvironmentRecord environment);
@@ -11,13 +10,13 @@ public interface EnvironmentProvisioner {
         provision(environment);
     }
 
-    default void provision(EnvironmentRecord environment, UUID createOperationId, BooleanSupplier leaseValid) {
+    default void provision(EnvironmentRecord environment, UUID createOperationId, OperationProgress leaseValid) {
         if (leaseValid.getAsBoolean()) {
             provision(environment, createOperationId);
         }
     }
 
-    boolean delete(EnvironmentRecord environment, UUID createOperationId, BooleanSupplier leaseValid);
+    boolean delete(EnvironmentRecord environment, UUID createOperationId, OperationProgress leaseValid);
 
     boolean isReady(EnvironmentRecord environment);
 }

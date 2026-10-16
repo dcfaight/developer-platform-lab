@@ -182,7 +182,10 @@ Readiness polls do not consume the transient-error retry budget. Transient
 Kubernetes errors use bounded retries; validation, authorization, and ownership
 failures are terminal. A readiness deadline prevents indefinite waiting.
 Operation detail retains UTC timestamps, attempt counts, sanitized messages,
-and progress events. Lease expiry permits at-least-once execution; idempotent
+and progress events, including lifecycle milestones such as `NAMESPACE_CREATED`
+and `NAMESPACE_DELETE_REQUESTED`. `GET /api/v1/operations/metrics` summarizes
+status counts, durations, and worker backlog/lease health
+(see [API contract](../docs/api.md#read-operation-metrics)). Lease expiry permits at-least-once execution; idempotent
 Kubernetes reconciliation and database fencing protect repeated work.
 Queued work and retry delays survive restart, as do provisioned/waiting checkpoints
 and terminal results. After a crash before a provisioning checkpoint, the worker

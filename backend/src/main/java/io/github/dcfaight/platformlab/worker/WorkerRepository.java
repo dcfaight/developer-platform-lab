@@ -3,11 +3,15 @@ package io.github.dcfaight.platformlab.worker;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
+import io.github.dcfaight.platformlab.kubernetes.OperationProgress.Milestone;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 @Repository
 public class WorkerRepository {
+    private static final Logger LOG = LoggerFactory.getLogger(WorkerRepository.class);
     private final JdbcTemplate jdbc;
 
     public WorkerRepository(JdbcTemplate jdbc) {
@@ -63,18 +67,45 @@ public class WorkerRepository {
                             THEN 'Worker reclaimed the operation after its previous lease expired; resuming persisted progress.'
                             ELSE 'Worker acquired the operation.' END), c.correlation_id
                     FROM changed c JOIN candidate previous ON previous.id = c.id
+                    RETURNING type, code
                 )
                 SELECT changed.*, (SELECT id FROM operations WHERE environment_id = changed.environment_id
-                    AND type = 'CREATE_ENVIRONMENT') AS create_operation_id
-                FROM changed
-                """, (rs, row) -> new Claim(rs.getObject("id", UUID.class),
-                rs.getObject("environment_id", UUID.class), rs.getObject("lease_token", UUID.class),
-                rs.getString("status"), rs.getTimestamp("provisioned_at") != null,
-                rs.getInt("failure_count"), rs.getString("type"),
-                rs.getObject("create_operation_id", UUID.class), rs.getInt("attempt_count")),
+                    AND type = 'CREATE_ENVIRONMENT') AS create_operation_id,
+                    event.type AS event_type, event.code AS event_code
+                FROM changed CROSS JOIN event
+                """, (rs, row) -> {
+                    var claim = new Claim(rs.getObject("id", UUID.class),
+                            rs.getObject("environment_id", UUID.class), rs.getObject("lease_token", UUID.class),
+                            rs.getString("status"), rs.getTimestamp("provisioned_at") != null,
+                            rs.getInt("failure_count"), rs.getString("type"),
+                            rs.getObject("create_operation_id", UUID.class), rs.getInt("attempt_count"));
+                    log(claim, rs.getString("event_type"), rs.getString("event_code"));
+                    return claim;
+                },
                 properties.readinessTimeout().toMillis(),
                 UUID.randomUUID(), properties.leaseDuration().toMillis())
                 .stream().findFirst();
+    }
+
+    /**
+     * Appends a lifecycle milestone while the caller still owns the lease. Each milestone is
+     * recorded at most once per operation, so retries and recovered leases do not repeat it.
+     */
+    public boolean progress(Claim claim, Milestone milestone) {
+        boolean recorded = jdbc.update("""
+                INSERT INTO operation_events (operation_id, type, code, message, correlation_id)
+                SELECT o.id, 'PROGRESS', ?, ?, o.correlation_id FROM operations o
+                WHERE o.id = ? AND o.status = 'RUNNING' AND o.lease_token = ?
+                    AND o.lease_expires_at > clock_timestamp()
+                    AND NOT EXISTS (SELECT 1 FROM operation_events e
+                        WHERE e.operation_id = o.id AND e.type = 'PROGRESS' AND e.code = ?)
+                FOR UPDATE OF o
+                """, milestone.name(), milestone.message(), claim.id(), claim.leaseToken(),
+                milestone.name()) == 1;
+        if (recorded) {
+            log(claim, "PROGRESS", milestone.name());
+        }
+        return recorded;
     }
 
     public boolean provisioned(Claim claim) {
@@ -94,10 +125,10 @@ public class WorkerRepository {
 
     public boolean succeed(Claim claim) {
         if (claim.deleting()) {
-            return transition(claim, "SUCCEEDED", "DELETED", "SUCCEEDED", "SUCCEEDED",
+            return transition(claim, "SUCCEEDED", "DELETED", "SUCCEEDED", "ENVIRONMENT_DELETED",
                     "Environment namespace is absent.", null, null, Duration.ZERO, false, false);
         }
-        return transition(claim, "SUCCEEDED", "READY", "SUCCEEDED", "SUCCEEDED",
+        return transition(claim, "SUCCEEDED", "READY", "SUCCEEDED", "ENVIRONMENT_READY",
                 "Environment is ready.", null, null, Duration.ZERO, false, false);
     }
 
@@ -121,7 +152,7 @@ public class WorkerRepository {
     private boolean transition(Claim claim, String status, String step, String event, String code,
             String message, String failureCode, String failureMessage, Duration delay,
             boolean incrementFailures, boolean provisioned) {
-        return jdbc.queryForObject("""
+        boolean changed = jdbc.queryForObject("""
                 WITH changed AS (
                     UPDATE operations SET status = ?, progress_step = ?, failure_code = ?, failure_message = ?,
                         failure_count = failure_count + ?,
@@ -151,6 +182,21 @@ public class WorkerRepository {
                 """, Integer.class, status, step, failureCode, failureMessage, incrementFailures ? 1 : 0,
                 provisioned, delay.toMillis(), status, status, status, claim.id(), claim.leaseToken(),
                 event, code, message) == 1;
+        if (changed) {
+            log(claim, event, code);
+        }
+        return changed;
+    }
+
+    private static void log(Claim claim, String event, String code) {
+        // Structured, operator-safe fields only: identifiers and fixed codes, never messages or tokens.
+        if ("FAILED".equals(event) || "RETRY".equals(event)) {
+            LOG.warn("Environment operation event event={} code={} operationId={} environmentId={} operationType={}",
+                    event, code, claim.id(), claim.environmentId(), claim.type());
+        } else {
+            LOG.info("Environment operation event event={} code={} operationId={} environmentId={} operationType={}",
+                    event, code, claim.id(), claim.environmentId(), claim.type());
+        }
     }
 
     public record Claim(UUID id, UUID environmentId, UUID leaseToken, String status,

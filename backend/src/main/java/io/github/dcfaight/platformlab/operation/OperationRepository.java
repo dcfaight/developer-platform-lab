@@ -86,6 +86,54 @@ public class OperationRepository {
                 rs.getString("message"), rs.getString("correlation_id"), instant(rs, "created_at")), id);
     }
 
+    public OperationMetrics metrics(boolean workerEnabled) {
+        var types = jdbc.query("""
+                WITH completed AS (
+                    SELECT type, status, extract(epoch FROM completed_at - created_at) AS duration,
+                        extract(epoch FROM started_at - created_at) AS queued
+                    FROM operations
+                )
+                SELECT t.type,
+                    count(c.status) FILTER (WHERE c.status = 'PENDING') AS pending,
+                    count(c.status) FILTER (WHERE c.status = 'RUNNING') AS running,
+                    count(c.status) FILTER (WHERE c.status = 'SUCCEEDED') AS succeeded,
+                    count(c.status) FILTER (WHERE c.status = 'FAILED') AS failed,
+                    round(avg(c.queued)::numeric, 3)::float8 AS average_queue,
+                    count(c.duration) FILTER (WHERE c.status = 'SUCCEEDED') AS duration_count,
+                    round(avg(c.duration) FILTER (WHERE c.status = 'SUCCEEDED')::numeric, 3)::float8 AS average,
+                    round((percentile_cont(0.95) WITHIN GROUP (ORDER BY c.duration)
+                        FILTER (WHERE c.status = 'SUCCEEDED'))::numeric, 3)::float8 AS p95,
+                    round(max(c.duration) FILTER (WHERE c.status = 'SUCCEEDED')::numeric, 3)::float8 AS maximum
+                FROM (VALUES ('CREATE_ENVIRONMENT'), ('DELETE_ENVIRONMENT')) AS t(type)
+                LEFT JOIN completed c ON c.type = t.type
+                GROUP BY t.type ORDER BY t.type
+                """, (rs, row) -> new OperationMetrics.TypeMetrics(rs.getString("type"),
+                rs.getLong("pending"), rs.getLong("running"), rs.getLong("succeeded"), rs.getLong("failed"),
+                rs.getObject("average_queue", Double.class),
+                new OperationMetrics.DurationSummary(rs.getLong("duration_count"),
+                        rs.getObject("average", Double.class), rs.getObject("p95", Double.class),
+                        rs.getObject("maximum", Double.class))));
+        var worker = jdbc.queryForObject("""
+                SELECT
+                    count(*) FILTER (WHERE status = 'PENDING' AND next_attempt_at <= clock_timestamp()) AS due,
+                    count(*) FILTER (WHERE status = 'RUNNING' AND lease_expires_at <= clock_timestamp()) AS expired,
+                    min(CASE WHEN status = 'PENDING' AND next_attempt_at <= clock_timestamp() THEN next_attempt_at
+                        WHEN status = 'RUNNING' AND lease_expires_at <= clock_timestamp() THEN lease_expires_at
+                        END) AS oldest_due,
+                    (SELECT max(created_at) FROM operation_events) AS last_event
+                FROM operations WHERE status IN ('PENDING', 'RUNNING')
+                """, (rs, row) -> new OperationMetrics.WorkerHealth(rs.getLong("due"), rs.getLong("expired"),
+                instant(rs, "oldest_due"), instant(rs, "last_event")));
+        var failures = jdbc.query("""
+                SELECT failure_code, count(*) AS failures FROM operations
+                WHERE status = 'FAILED' AND failure_code IS NOT NULL
+                GROUP BY failure_code ORDER BY failures DESC, failure_code LIMIT 20
+                """, (rs, row) -> new OperationMetrics.FailureCount(rs.getString("failure_code"),
+                rs.getLong("failures")));
+        var now = jdbc.queryForObject("SELECT clock_timestamp()", OffsetDateTime.class).toInstant();
+        return new OperationMetrics(now, workerEnabled, types, worker, failures);
+    }
+
     public record OperationEvent(String type, String code, String message, String correlationId, Instant createdAt) {
     }
 
