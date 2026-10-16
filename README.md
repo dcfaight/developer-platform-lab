@@ -2,7 +2,7 @@
 
 A hands-on internal developer platform for provisioning development environments, deploying a sample application, and understanding operational status through a self-service portal.
 
-> **Project status:** Persistent requests support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal supports create → observe → delete, with confirmation and ownership-checked asynchronous namespace removal. Expiration cleanup, authentication/authorization, continuous health monitoring, and production deployment hardening remain unimplemented. This is a production-minded lifecycle slice, not overall production readiness.
+> **Project status:** Persistent requests support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal supports create → observe → delete, with confirmation and ownership-checked asynchronous namespace removal. Manual API-driven expiration cleanup is available, dry-run by default. Authentication/authorization, continuous health monitoring, and production deployment hardening remain unimplemented. This is a production-minded lifecycle slice, not overall production readiness.
 >
 > Except where marked as available now, this README preserves the intended architecture and delivery blueprint, not a claim that the full platform is implemented.
 >
@@ -13,7 +13,7 @@ A hands-on internal developer platform for provisioning development environments
 | Implemented now | Future work, not demo claims |
 |---|---|
 | Portal creation and guarded asynchronous deletion; durable requests and ownership checks | Production deployment hardening |
-| Opt-in leased worker provisioning an approved sample in local kind | Expiration cleanup and continuous post-provisioning health monitoring |
+| Opt-in leased worker provisioning an approved sample in local kind; manual expiration CLI | Scheduled expiration and continuous post-provisioning health monitoring |
 | Portal with page-local status counts, creation, details, and durable operation timelines | Authentication, production RBAC, and multi-user hardening |
 | Loading/error/retry states, sanitized failures, and request correlation | Custom templates/images, Services, and ingress |
 
@@ -89,11 +89,13 @@ records for inspection. A failed deletion can be requested again after correctin
 the cause; ownership failures must never be bypassed. These resource-ownership
 checks are not user authorization: the lab still assumes trusted local callers.
 
-### Expire an environment (planned)
+### Expire an environment (available now, manually invoked)
 
 The Python cleanup tool identifies expired environments through the backend API and requests deletion using the same workflow as the portal.
 
 It does not independently delete arbitrary Kubernetes namespaces.
+TTL metadata alone starts no daemon. See the [cleanup CLI/runbook](automation/README.md)
+for trusted-loopback commands, finite bounds, exit statuses, and failure policy.
 
 ## 4. Technology Choices
 
@@ -249,7 +251,7 @@ The frontend provides an environment creation and status portal. The backend req
 implements persistent environment creation/deletion requests and environment/operation
 reads, with Flyway migrations and durable idempotency. An opt-in worker provisions
 an approved sample workload only in the dedicated local kind cluster and safely
-removes owned namespaces. Automatic expiration cleanup remains unimplemented;
+removes owned namespaces. Expiration cleanup requires invoking the dry-run-first CLI;
 Kubernetes is not required for API-only acceptance and reads.
 Area README files describe the current scope.
 `docs/decisions/` and `docs/runbooks/` are reserved for future operational documentation.
@@ -336,8 +338,8 @@ The MVP uses an explicitly labeled local-development actor. This is not a substi
 All routes use the `/api/v1` prefix. This table preserves the target blueprint.
 Currently implemented: `POST /environments`, `GET /environments` (pagination
 only, no status filter), `GET /environments/{id}`,
-`GET /environments/{id}/operations` (paginated history), and `GET /operations/{id}`.
-Deletion and environment events routes are not implemented. Operation detail
+`GET /environments/{id}/operations` (paginated history), `DELETE /environments/{id}`,
+and `GET /operations/{id}`. Environment events routes are not implemented. Operation detail
 includes durable progress events. Acceptance still returns `REQUESTED` / `PENDING`;
 only the worker can verify readiness and mark the environment `READY`.
 
@@ -443,18 +445,20 @@ The UI distinguishes “request accepted,” “resources created,” and “app
 
 ## 13. Cleanup Automation
 
-The Python expiration tool will:
+The Python expiration tool:
 
-1. Fetch expired, non-deleted environments.
-2. Display intended actions in dry-run mode.
-3. Request deletion through the backend.
-4. Handle already-deleting environments safely.
-5. Record a structured execution summary.
-6. Return a nonzero exit code for actionable failures.
+1. Scans bounded API pages, deduplicating IDs (not a cross-page snapshot).
+2. Selects expired `READY`/`FAILED` environments at one UTC cutoff.
+3. Displays intended actions by default; only `--execute` requests deletion.
+4. Rechecks detail and uses an atomic server-side expiration/state guard.
+5. Never retries DELETE or terminal `DELETE_FAILED` operations automatically.
+6. Emits a structured summary and nonzero exit for errors/incomplete scans.
 
-Initial execution is manual or locally scheduled.
-
-A Kubernetes CronJob can be added later without changing deletion semantics.
+Execution is manual and trusted-loopback only; no scheduler/CronJob is added.
+`202` is acceptance, not namespace removal. Database/audit history is retained.
+See [commands, bounds, recovery and exit codes](automation/README.md) and the
+[create → expire walkthrough](docs/demo.md#5-manual-expiration-cleanup).
+Auth/authz and deployment hardening remain prerequisites for broader use.
 
 ## 14. Local Setup Plan
 
@@ -648,7 +652,7 @@ Any reported performance results will include the test environment and method.
 ### Milestone 3: Safe lifecycle
 
 - Implement deletion (available; see the API contract and local runbook).
-- Add expiration cleanup.
+- Add expiration cleanup (manual CLI available; scheduling deferred).
 - Test retries and worker restart recovery.
 - Add ownership safeguards.
 

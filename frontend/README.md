@@ -75,7 +75,9 @@ new dependencies are development-only testing tools.
 ## Current limitations
 
 No authentication, filtering, push updates, log stream, or direct Kubernetes
-actions are exposed. Expiry is metadata, not automated cleanup.
+actions are exposed. Expiry metadata alone does not trigger removal; the separate
+[manual cleanup CLI](../automation/README.md) defaults to dry-run and requires
+explicit `--execute`. The portal does not invoke expiration cleanup.
 Only backend-sanitized summaries are available; messages render as text, not HTML.
 Polling and offset pagination are intended for a small local demo, not a large
 multi-user service. No consistent snapshot across separate HTTP requests is promised.

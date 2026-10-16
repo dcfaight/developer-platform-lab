@@ -66,6 +66,15 @@ public class EnvironmentService {
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public AcceptedEnvironmentResponse delete(UUID id) {
+        return delete(id, null);
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public AcceptedEnvironmentResponse delete(UUID id, Instant expiredBefore) {
+        if (expiredBefore != null && expiredBefore.isAfter(clock.instant())) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST",
+                    "expiredBefore must not be in the future.");
+        }
         var environment = environments.lock(id).orElseThrow(() ->
                 new ApiException(HttpStatus.NOT_FOUND, "NOT_FOUND", "Environment not found."));
         if (!("env-" + id.toString().replace("-", "")).equals(environment.namespace())) {
@@ -89,6 +98,11 @@ public class EnvironmentService {
         if (!java.util.Set.of("READY", "FAILED", "DELETE_FAILED").contains(environment.status())) {
             throw new ApiException(HttpStatus.CONFLICT, "ENVIRONMENT_STATE_CONFLICT",
                     "The environment cannot be deleted in its current state.");
+        }
+        if (expiredBefore != null && (!java.util.Set.of("READY", "FAILED").contains(environment.status())
+                || environment.expiresAt().isAfter(expiredBefore))) {
+            throw new ApiException(HttpStatus.CONFLICT, "ENVIRONMENT_STATE_CONFLICT",
+                    "The environment is not eligible for deletion at the requested expiry cutoff.");
         }
         Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
         UUID operationId = UUID.randomUUID();

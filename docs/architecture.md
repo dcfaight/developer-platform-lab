@@ -27,7 +27,9 @@ Lease expiry can overlap Kubernetes calls; ownership checks and optimistic
 concurrency make repeat execution safe. The lease token protects database writes,
 not the Kubernetes API. The React portal submits creation and confirmed deletion,
 and consumes environment lists, details, and operation history through the Vite
-development proxy; it holds no Kubernetes credentials. There is no automatic
-expiration cleanup, periodic post-success health reconciliation, production RBAC,
+development proxy; it holds no Kubernetes credentials. The manually invoked
+Python expiration CLI defaults to dry-run and uses the same delete API, with a
+row-locked cutoff/state guard preventing terminal-failure retries. It has no SQL
+or Kubernetes access. There is no expiration scheduler, periodic post-success health reconciliation, production RBAC,
 or authentication/authorization. Namespace ownership is a resource-safety check,
 not a user identity or access policy.

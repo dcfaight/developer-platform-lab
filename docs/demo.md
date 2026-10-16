@@ -8,7 +8,7 @@ not that the application is continuously monitored.
 
 ## Prerequisites and startup
 
-Use a trusted local machine with Bash, Docker + Compose, kind, kubectl, Java 17,
+Use a trusted local machine with Bash, Python 3.12, Docker + Compose, kind, kubectl, Java 17,
 Node.js 24 + npm 11, curl, and jq. Allow image pulls and Maven/npm downloads.
 Reserve ports 5432, 8080, and 5173 (8081 is optional for the sample).
 Commands start from the repository root unless stated otherwise.
@@ -209,6 +209,104 @@ finalizers, or delete namespaces directly as a recovery shortcut. Kubernetes
 absence is success, but an owned namespace stuck terminating remains pending until
 the deadline and can report `DELETE_FAILED`.
 
+## 5. Manual expiration cleanup
+
+This is a **separate** create → expire → dry-run → execute → observe walkthrough,
+not a way to shorten application TTL. Keep the worker and dedicated kind cluster
+running. Use a disposable trusted-local inventory: execution selects **all**
+expired `READY`/`FAILED` records, not just the example. Review the dry-run IDs.
+There is no scheduler, auth/authz, or public/shared deployment support.
+
+In a new Bash terminal at the repository root:
+
+```bash
+set -euo pipefail
+API=http://127.0.0.1:8080/api/v1
+CREATED=$(curl --fail-with-body --silent --show-error \
+  --connect-timeout 3 --max-time 15 "$API/environments" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: expiry-demo-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM" \
+  -d '{"name":"expiration-demo","templateId":"sample-service","ttlHours":1}')
+ENVIRONMENT_ID=$(jq -er '.environmentId' <<< "$CREATED")
+CREATE_OPERATION_ID=$(jq -er '.operationId' <<< "$CREATED")
+
+deadline=$((SECONDS + 420))
+status=PENDING
+while (( SECONDS < deadline )); do
+  OPERATION=$(curl --fail-with-body --silent --show-error \
+    --connect-timeout 3 --max-time 10 "$API/operations/$CREATE_OPERATION_ID")
+  status=$(jq -er '.status' <<< "$OPERATION")
+  case "$status" in
+    SUCCEEDED) break ;;
+    FAILED) jq . <<< "$OPERATION"; exit 1 ;;
+  esac
+  sleep 3
+done
+[[ "$status" == SUCCEEDED ]] || { echo 'Creation incomplete; inspect history.' >&2; exit 1; }
+ENVIRONMENT=$(curl --fail-with-body --silent --show-error \
+  --connect-timeout 3 --max-time 10 "$API/environments/$ENVIRONMENT_ID")
+EXPIRES_AT=$(jq -er '.expiresAt' <<< "$ENVIRONMENT")
+NAMESPACE=$(jq -er '.namespace' <<< "$ENVIRONMENT")
+printf 'Wait for the real expiry: %s (up to one hour)\n' "$EXPIRES_AT"
+# Bounded real-clock wait, not an injected production cutoff or database edit.
+python3 -c 'import datetime, math, sys, time
+expiry = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+seconds = max(0, math.ceil((expiry - datetime.datetime.now(datetime.timezone.utc)).total_seconds()) + 1)
+if seconds > 3660: raise SystemExit("Unexpected expiry; inspect rather than extending the wait")
+time.sleep(seconds)' "$EXPIRES_AT"
+
+python3 automation/cleanup_expired.py --api-base-url "$API" --dry-run --json
+# STOP and review selectedIds before the next command. This is a fresh scan.
+```
+
+TTL passing alone has made no cleanup request. After reviewing the inventory:
+
+```bash
+if SUMMARY=$(python3 automation/cleanup_expired.py --api-base-url "$API" --execute --json); then
+  :
+else
+  printf '%s\n' "$SUMMARY"
+  echo 'Cleanup incomplete; inspect summary/history before rerunning.' >&2
+  exit 1
+fi
+jq . <<< "$SUMMARY"
+DELETE_OPERATION_ID=$(jq -er --arg id "$ENVIRONMENT_ID" \
+  '.acceptedOperations[] | select(.environmentId == $id) | .operationId' <<< "$SUMMARY")
+# This UUID is acceptance/recovery evidence, not proof of completed removal.
+deadline=$((SECONDS + 420))
+status=PENDING
+while (( SECONDS < deadline )); do
+  OPERATION=$(curl --fail-with-body --silent --show-error \
+    --connect-timeout 3 --max-time 10 "$API/operations/$DELETE_OPERATION_ID")
+  jq '{status, progressStep, failureCode, failureMessage}' <<< "$OPERATION"
+  status=$(jq -er '.status' <<< "$OPERATION")
+  case "$status" in
+    SUCCEEDED) break ;;
+    FAILED) jq '.events' <<< "$OPERATION"; exit 1 ;;
+  esac
+  sleep 3
+done
+[[ "$status" == SUCCEEDED ]] || { echo 'Deletion incomplete; inspect history.' >&2; exit 1; }
+ENVIRONMENT=$(curl --fail-with-body --silent --show-error \
+  --connect-timeout 3 --max-time 10 "$API/environments/$ENVIRONMENT_ID")
+jq -e '.status == "DELETED"' <<< "$ENVIRONMENT"
+REMAINING=$(kubectl --context kind-developer-platform-lab get namespace \
+  "$NAMESPACE" --ignore-not-found -o name)
+[[ -z "$REMAINING" ]] || { echo 'Namespace remains; inspect it.' >&2; exit 1; }
+python3 automation/cleanup_expired.py --api-base-url "$API" --dry-run --json
+```
+
+The last run skips the retained `DELETED` record; DB operations and audit history
+remain available. A terminal `DELETE_FAILED` is skipped on every cleanup run.
+Investigate before deliberately retrying through the portal/manual API. If a CLI
+response is ambiguous, inspect detail/history first, not repeated DELETEs.
+Exit 1 means errors/incomplete work (including limits); exit 2 means invalid
+arguments. See [full policy, counters and recovery runbook](../automation/README.md).
+
+For fast repeatable verification, behavioral tests inject a clock and backend
+tests seed controlled expired fixtures. Those are test-only mechanisms, not
+operator instructions to edit the database or weaken the 1–24-hour TTL validation.
+
 ## Troubleshooting and presenter fallback
 
 | Symptom | Check / expected behavior |
@@ -226,7 +324,7 @@ demonstrate durable `REQUESTED` / `PENDING`, safe replay, and portal reads. **Do
 resources were provisioned.** Restarting the backend with the worker enabled
 later processes pending work. Never use a shared cluster for failure injection.
 
-### Verification limits for this lifecycle slice
+### Prior deletion-slice verification limits
 
 Automated frontend and PostgreSQL-backed backend checks cover acceptance,
 ownership conflicts, duplicate requests, retries, and lease recovery. A real-kind
@@ -247,8 +345,9 @@ without discarding its named volume:
 docker compose stop postgres
 ```
 
-Use the portal/API deletion workflow for individual environments before stopping
-the worker. There is still no automatic cleanup on expiry, failure, or shutdown.
+Use the portal/API deletion workflow or explicitly invoke the expiration CLI
+before stopping the worker. There is no daemon-triggered cleanup on expiry,
+failure, or shutdown.
 If you intentionally want to remove **all workloads in this disposable lab
 cluster**, the separate manual reset remains:
 
