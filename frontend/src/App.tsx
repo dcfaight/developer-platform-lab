@@ -25,14 +25,14 @@ function App() {
     <main id="main-content" tabIndex={-1}>
       <div className="intro"><p className="eyebrow">Local development platform</p>
         <h1>Environment control room</h1>
-        <p>Follow environment readiness, provisioning progress, and failures in one place.</p>
+        <p>Follow environment readiness, operation progress, and failures in one place.</p>
         <p className="muted">Status refreshes every 10 seconds. All times are shown in your local timezone.</p>
       </div>
       {match ? <EnvironmentDetail key={match[1]} id={match[1]} />
         : creating ? <CreateEnvironment />
           : <EnvironmentList page={page} onPageChange={setPage} />}
     </main>
-    <footer>Work-in-progress portfolio blueprint · Trusted local use only · No deletion or authentication controls</footer>
+    <footer>Work-in-progress portfolio blueprint · Trusted local use only · No authentication controls</footer>
   </div>
 }
 

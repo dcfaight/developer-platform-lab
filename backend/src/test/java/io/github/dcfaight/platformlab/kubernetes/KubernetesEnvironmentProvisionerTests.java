@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.fabric8.kubernetes.api.model.Namespace;
 import io.fabric8.kubernetes.api.model.NamespaceBuilder;
+import io.fabric8.kubernetes.api.model.DeleteOptions;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.apps.DeploymentStatusBuilder;
 import io.fabric8.kubernetes.client.Config;
@@ -33,6 +34,11 @@ class KubernetesEnvironmentProvisionerTests {
     private boolean staleUpdate;
     private boolean redirect;
     private int redirectedRequests;
+    private final UUID createOperationId = UUID.randomUUID();
+    private DeleteOptions deleteOptions;
+    private int deletes;
+    private boolean deleteRace;
+    private boolean goneOnDelete;
 
     @BeforeEach
     void start() throws IOException {
@@ -101,6 +107,8 @@ class KubernetesEnvironmentProvisionerTests {
         namespace = new NamespaceBuilder().withNewMetadata().withName(environment.namespace()).endMetadata().build();
         assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT", () -> provisioner.provision(environment));
         assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT", () -> provisioner.isReady(environment));
+        assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT",
+                () -> provisioner.delete(environment, createOperationId, () -> true));
         assertEquals(0, writes);
     }
 
@@ -174,6 +182,167 @@ class KubernetesEnvironmentProvisionerTests {
         assertEquals(0, writes);
     }
 
+    @Test
+    void deletionUsesBothPreconditionsAndWaitsForActualAbsence() {
+        provisioner.provision(environment, createOperationId);
+        String uid = namespace.getMetadata().getUid();
+        String resourceVersion = namespace.getMetadata().getResourceVersion();
+        assertFalse(provisioner.delete(environment, createOperationId, () -> true));
+        assertEquals(uid, deleteOptions.getPreconditions().getUid());
+        assertEquals(resourceVersion, deleteOptions.getPreconditions().getResourceVersion());
+        assertEquals(1, deletes);
+        assertFalse(provisioner.delete(environment, createOperationId, () -> true));
+        assertEquals(1, deletes, "A terminating namespace must only be polled");
+        assertFalse(provisioner.delete(environment, createOperationId, () -> {
+            fail("A terminating namespace must not attempt another DELETE");
+            return false;
+        }));
+        namespace = null;
+        assertTrue(provisioner.delete(environment, createOperationId, () -> true));
+        assertEquals(1, deletes);
+    }
+
+    @Test
+    void createChecksLeaseBeforeReadsAndEachCreateMutation() {
+        provisioner.provision(environment, createOperationId, () -> false);
+        assertNull(namespace);
+        assertEquals(0, writes);
+        var checks = new java.util.concurrent.atomic.AtomicInteger();
+        provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() < 2);
+        assertNull(namespace);
+        assertEquals(0, writes);
+        checks.set(0);
+        provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() < 3);
+        assertNotNull(namespace);
+        assertNull(deployment);
+        assertEquals(1, writes);
+    }
+
+    @Test
+    void createChecksLeaseBeforeReplacingDeployment() {
+        provisioner.provision(environment, createOperationId);
+        deployment.getSpec().setReplicas(2);
+        var checks = new java.util.concurrent.atomic.AtomicInteger();
+        provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() < 2);
+        assertEquals(2, writes);
+        assertEquals(2, deployment.getSpec().getReplicas());
+    }
+
+    @Test
+    void createNeverUsesNamespaceOwnedByDifferentCreateOperation() {
+        provisioner.provision(environment, createOperationId);
+        assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT",
+                () -> provisioner.provision(environment, UUID.randomUUID(), () -> true));
+        assertEquals(2, writes);
+    }
+
+    @Test
+    void deletionRequiresManagedLabelsAnnotationsAndOriginalCreateOperation() {
+        provisioner.provision(environment, createOperationId);
+        var owned = new NamespaceBuilder(namespace).build();
+        for (String key : new String[] {KubernetesEnvironmentProvisioner.MANAGED_BY,
+                KubernetesEnvironmentProvisioner.ENVIRONMENT_ID,
+                KubernetesEnvironmentProvisioner.CREATE_OPERATION_ID}) {
+            namespace = new NamespaceBuilder(owned).build();
+            namespace.getMetadata().getLabels().put(key, UUID.randomUUID().toString());
+            assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT",
+                    () -> provisioner.delete(environment, createOperationId, () -> true));
+            namespace = new NamespaceBuilder(owned).build();
+            namespace.getMetadata().getAnnotations().remove(key);
+            assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT",
+                    () -> provisioner.delete(environment, createOperationId, () -> true));
+        }
+        namespace = owned;
+        assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT",
+                () -> provisioner.delete(environment, UUID.randomUUID(), () -> true));
+        assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT",
+                () -> provisioner.delete(environment, null, () -> true));
+        assertEquals(0, deletes);
+    }
+
+    @Test
+    void deletionSupportsOriginalPlatformOwnershipWithoutRelabeling() {
+        provisioner.provision(environment);
+        assertFalse(namespace.getMetadata().getLabels().containsKey(KubernetesEnvironmentProvisioner.CREATE_OPERATION_ID));
+        assertFalse(namespace.getMetadata().getAnnotations()
+                .containsKey(KubernetesEnvironmentProvisioner.CREATE_OPERATION_ID));
+        assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT",
+                () -> provisioner.delete(environment, null, () -> true));
+        String uid = namespace.getMetadata().getUid();
+        String version = namespace.getMetadata().getResourceVersion();
+        assertFalse(provisioner.delete(environment, createOperationId, () -> true));
+        assertEquals(uid, deleteOptions.getPreconditions().getUid());
+        assertEquals(version, deleteOptions.getPreconditions().getResourceVersion());
+        assertEquals(1, deletes);
+        assertEquals(2, writes, "Legacy ownership must never be relabeled");
+        assertFalse(namespace.getMetadata().getLabels().containsKey(KubernetesEnvironmentProvisioner.CREATE_OPERATION_ID));
+        assertFalse(namespace.getMetadata().getAnnotations()
+                .containsKey(KubernetesEnvironmentProvisioner.CREATE_OPERATION_ID));
+        namespace = null;
+        assertTrue(provisioner.delete(environment, createOperationId, () -> true));
+    }
+
+    @Test
+    void deletionNeverTreatsPartialOrMismatchedCreateMarkersAsLegacy() {
+        provisioner.provision(environment, createOperationId);
+        var owned = new NamespaceBuilder(namespace).build();
+        namespace.getMetadata().getLabels().remove(KubernetesEnvironmentProvisioner.CREATE_OPERATION_ID);
+        assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT",
+                () -> provisioner.delete(environment, createOperationId, () -> true));
+        namespace = new NamespaceBuilder(owned).build();
+        namespace.getMetadata().getAnnotations().remove(KubernetesEnvironmentProvisioner.CREATE_OPERATION_ID);
+        assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT",
+                () -> provisioner.delete(environment, createOperationId, () -> true));
+        namespace = new NamespaceBuilder(owned).build();
+        namespace.getMetadata().getAnnotations().put(KubernetesEnvironmentProvisioner.CREATE_OPERATION_ID,
+                UUID.randomUUID().toString());
+        assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT",
+                () -> provisioner.delete(environment, createOperationId, () -> true));
+        assertEquals(0, deletes);
+    }
+
+    @Test
+    void deletionRefusesNoncanonicalNamesMissingIdentityAndExpiredLease() {
+        provisioner.provision(environment, createOperationId);
+        var invalid = new EnvironmentRecord(environment.id(), "bad", "default", "sample-service", "DELETING",
+                Instant.now(), Instant.now(), Instant.now());
+        assertPermanent("KUBERNETES_VALIDATION_FAILED",
+                () -> provisioner.delete(invalid, createOperationId, () -> true));
+        namespace.getMetadata().setUid(null);
+        assertPermanent("KUBERNETES_VALIDATION_FAILED",
+                () -> provisioner.delete(environment, createOperationId, () -> true));
+        namespace.getMetadata().setUid(UUID.randomUUID().toString());
+        namespace.getMetadata().setResourceVersion(null);
+        assertPermanent("KUBERNETES_VALIDATION_FAILED",
+                () -> provisioner.delete(environment, createOperationId, () -> true));
+        namespace.getMetadata().setResourceVersion("1");
+        assertFalse(provisioner.delete(environment, createOperationId, () -> false));
+        assertEquals(0, deletes);
+    }
+
+    @Test
+    void deletionDoesNotRemoveReplacementBetweenGetAndDelete() {
+        provisioner.provision(environment, createOperationId);
+        String originalUid = namespace.getMetadata().getUid();
+        deleteRace = true;
+        var error = assertThrows(ProvisioningException.class,
+                () -> provisioner.delete(environment, createOperationId, () -> true));
+        assertTrue(error.retryable());
+        assertEquals(originalUid, deleteOptions.getPreconditions().getUid());
+        assertNotEquals(originalUid, namespace.getMetadata().getUid());
+        assertEquals(0, deletes);
+        assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT",
+                () -> provisioner.delete(environment, createOperationId, () -> true));
+    }
+
+    @Test
+    void disappearanceBetweenGetAndDeleteSucceeds() {
+        provisioner.provision(environment, createOperationId);
+        goneOnDelete = true;
+        assertTrue(provisioner.delete(environment, createOperationId, () -> true));
+        assertNull(namespace);
+    }
+
     private static void assertPermanent(String code, org.junit.jupiter.api.function.Executable action) {
         var error = assertThrows(ProvisioningException.class, action);
         assertEquals(code, error.code());
@@ -233,6 +402,27 @@ class KubernetesEnvironmentProvisionerTests {
                 }
                 writes++;
                 respond(exchange, 201, namespaces ? namespace : deployment);
+            } else if ("DELETE".equals(method) && namespaces) {
+                deleteOptions = Serialization.unmarshal(exchange.getRequestBody(), DeleteOptions.class);
+                if (goneOnDelete) {
+                    namespace = null;
+                    respond(exchange, 404, null);
+                    return;
+                }
+                if (deleteRace) {
+                    namespace.getMetadata().setUid(UUID.randomUUID().toString());
+                    namespace.getMetadata().getLabels().put(KubernetesEnvironmentProvisioner.CREATE_OPERATION_ID,
+                            UUID.randomUUID().toString());
+                }
+                if (!namespace.getMetadata().getUid().equals(deleteOptions.getPreconditions().getUid())
+                        || !namespace.getMetadata().getResourceVersion()
+                            .equals(deleteOptions.getPreconditions().getResourceVersion())) {
+                    respond(exchange, 409, null);
+                    return;
+                }
+                deletes++;
+                namespace.getMetadata().setDeletionTimestamp("2026-01-01T00:00:00Z");
+                respond(exchange, 202, namespace);
             } else if ("PUT".equals(method) && deployments) {
                 var update = Serialization.unmarshal(exchange.getRequestBody(), Deployment.class);
                 if (staleUpdate || !deployment.getMetadata().getResourceVersion()

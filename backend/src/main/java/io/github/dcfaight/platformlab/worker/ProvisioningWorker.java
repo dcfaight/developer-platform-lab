@@ -39,8 +39,32 @@ public class ProvisioningWorker {
             }
             try {
                 var environment = environments.find(claim.environmentId()).orElseThrow();
+                if (claim.deleting()) {
+                    if (!operations.owns(claim)) {
+                        return;
+                    }
+                    if (provisioner.delete(environment, claim.createOperationId(), () -> {
+                        if (!operations.owns(claim)) {
+                            return false;
+                        }
+                        // Reclaims must observe accepted deletion/absence before enforcing crash exhaustion.
+                        if (!claim.provisioned() && claim.attemptCount() > properties.maxAttempts()) {
+                            throw new ProvisioningException("ATTEMPTS_EXHAUSTED",
+                                    "Deletion did not complete within its attempt limits.", false);
+                        }
+                        return true;
+                    })) {
+                        operations.succeed(claim);
+                    } else {
+                        operations.deletionWaiting(claim, properties.readinessPollInterval());
+                    }
+                    return;
+                }
                 if (!claim.provisioned()) {
-                    provisioner.provision(environment);
+                    if (!operations.owns(claim)) {
+                        return;
+                    }
+                    provisioner.provision(environment, claim.id(), () -> operations.owns(claim));
                     if (!operations.provisioned(claim)) {
                         return;
                     }
@@ -60,11 +84,12 @@ public class ProvisioningWorker {
                     operations.fail(claim, failure.code(), failure.getMessage());
                 }
             } catch (Exception failure) {
-                operations.fail(claim, "INTERNAL_ERROR", "An internal provisioning error occurred.");
+                operations.fail(claim, "INTERNAL_ERROR", claim.deleting()
+                        ? "An internal deletion error occurred." : "An internal provisioning error occurred.");
                 // Never log exception messages, which may contain credentials or Kubernetes response bodies.
-                LOG.error("Unexpected provisioning failure operationId={} exceptionType={}",
+                LOG.error("Unexpected environment operation failure operationId={} exceptionType={}",
                         claim.id(), failure.getClass().getName());
-                throw new IllegalStateException("Internal provisioning failure for operation " + claim.id());
+                throw new IllegalStateException("Internal environment operation failure for operation " + claim.id());
             }
         });
     }

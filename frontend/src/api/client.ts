@@ -61,6 +61,13 @@ export interface AcceptedEnvironment {
   operationStatus: 'PENDING'
 }
 
+export interface AcceptedDeletion {
+  environmentId: string
+  operationId: string
+  environmentStatus: 'DELETING'
+  operationStatus: 'PENDING' | 'RUNNING'
+}
+
 export interface ApiFieldError {
   field: string
   message: string
@@ -216,6 +223,59 @@ function acceptedEnvironment(value: unknown): AcceptedEnvironment {
     operationId: item.operationId,
     environmentStatus: 'REQUESTED',
     operationStatus: 'PENDING',
+  }
+}
+
+export async function deleteEnvironment(id: string, signal?: AbortSignal): Promise<AcceptedDeletion> {
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  signal?.addEventListener('abort', abort, { once: true })
+  if (signal?.aborted) controller.abort()
+  const timeout = setTimeout(abort, CREATION_TIMEOUT_MS)
+  let requestId: string | undefined
+  try {
+    let response: Response
+    try {
+      response = await fetch(`/api/v1/environments/${encodeURIComponent(id)}`, {
+        method: 'DELETE', signal: controller.signal, headers: { Accept: 'application/json' },
+      })
+    } catch (error) {
+      if (signal?.aborted) throw error
+      throw new ApiError('The connection was interrupted or timed out. Deletion may have been accepted. Check the status or retry deletion for this same environment safely.',
+        undefined, undefined, [], true)
+    }
+    requestId = requestIdentifier(response.headers.get('X-Request-Id'))
+    if (!response.ok) {
+      let body: JsonObject = {}
+      try {
+        body = object(await response.json())
+      } catch {
+        // Never expose server or proxy diagnostic bodies.
+      }
+      requestId = requestIdentifier(body.requestId) ?? requestId
+      const code = typeof body.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(body.code) ? body.code : undefined
+      throw new ApiError(response.status >= 500
+        ? 'The server could not confirm deletion. It may have been accepted. Check the status or retry deletion for this same environment safely.'
+        : `Deletion was rejected (HTTP ${response.status}). Refresh status before trying again.`,
+      requestId, code, [], response.status >= 500)
+    }
+    try {
+      const item = object(await response.json())
+      if (response.status !== 202 || item.environmentId !== id
+        || typeof item.operationId !== 'string' || !UUID.test(item.operationId)
+        || item.environmentStatus !== 'DELETING'
+        || (item.operationStatus !== 'PENDING' && item.operationStatus !== 'RUNNING')) {
+        throw new Error('Invalid deletion acceptance')
+      }
+      return { environmentId: id, operationId: item.operationId,
+        environmentStatus: 'DELETING', operationStatus: item.operationStatus }
+    } catch {
+      throw new ApiError('The API returned an unexpected deletion response. Deletion may have been accepted. Check the status or retry deletion for this same environment safely.',
+        requestId, undefined, [], true)
+    }
+  } finally {
+    clearTimeout(timeout)
+    signal?.removeEventListener('abort', abort)
   }
 }
 

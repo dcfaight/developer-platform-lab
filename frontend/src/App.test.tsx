@@ -317,14 +317,14 @@ describe('portal', () => {
   })
 
   it('summarizes only the loaded page, not the inventory total', async () => {
-    const items = ['READY', 'REQUESTED', 'PROVISIONING', 'FAILED'].map((status, index) => ({
+    const items = ['READY', 'REQUESTED', 'PROVISIONING', 'FAILED', 'DELETING', 'DELETE_FAILED'].map((status, index) => ({
       ...demoEnvironment, id: `environment-${index}`, name: `Environment ${index}`, status,
     }))
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(paged(items, { totalElements: 24, totalPages: 3 }))))
     render(<App />)
     const summary = await screen.findByRole('region', { name: 'Status summary for this page' })
-    expect(summary.textContent).toContain('This page only · 4 environments')
-    for (const [label, count] of [['Ready', '1'], ['In progress', '2'], ['Failed', '1']]) {
+    expect(summary.textContent).toContain('This page only · 6 environments')
+    for (const [label, count] of [['Ready', '1'], ['In progress', '3'], ['Failed', '2']]) {
       expect(within(summary).getByText(label).nextElementSibling?.textContent).toBe(count)
     }
     expect(screen.getByText('24 total')).toBeTruthy()

@@ -1,6 +1,6 @@
 # Frontend
 
-React + TypeScript + Vite environment creation and status portal. Requires Node.js
+React + TypeScript + Vite environment lifecycle and status portal. Requires Node.js
 24 and npm 11. This is a work-in-progress portfolio platform, not production software.
 
 From this directory:
@@ -40,6 +40,17 @@ http://127.0.0.1:8080. No CORS changes or frontend credentials are needed.
   state. Starting a new request after an uncertain result requires explicit
   confirmation and warns that the earlier request may already exist. This is not
   cancellation and does not guarantee absence.
+- Environment detail exposes guarded deletion for READY, FAILED, and DELETE_FAILED
+  environments without a pending/running latest operation. Confirm the exact
+  `namespace/name` in a keyboard-accessible dialog, or cancel without sending a request.
+  Duplicate submission is blocked; navigation aborts outstanding browser requests,
+  not server-side cleanup. `DELETE /api/v1/environments/{id}` sends no body or
+  idempotency key: the server serializes deletion by environment ID.
+- Deletion acceptance is not completion. Acceptance immediately refreshes detail
+  and resets history to the newest page, then normal polling continues. Sanitized
+  errors include safe request IDs. An interrupted/uncertain request can be retried
+  for the same environment when its current status allows deletion; if already
+  DELETING, cancel the dialog and monitor history instead.
 
 The portal uses only the same-origin `/api` proxy and does not access Kubernetes
 credentials or accept arbitrary templates/images. Use the
@@ -63,7 +74,7 @@ new dependencies are development-only testing tools.
 
 ## Current limitations
 
-No deletion, authentication, filtering, push updates, log stream, or Kubernetes
+No authentication, filtering, push updates, log stream, or direct Kubernetes
 actions are exposed. Expiry is metadata, not automated cleanup.
 Only backend-sanitized summaries are available; messages render as text, not HTML.
 Polling and offset pagination are intended for a small local demo, not a large

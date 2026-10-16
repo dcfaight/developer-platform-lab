@@ -25,6 +25,9 @@ backend, not a container with a different loopback network. Do not commit
 kubeconfig files or secrets. The kind admin credentials are for this disposable
 lab only, not a production permission model.
 
-Provisioned namespaces are retained, including after failures or TTL expiry.
-There is no deletion/cleanup API in this slice. Deleting the entire disposable
-kind cluster above is a manual lab reset, not platform cleanup.
+Provisioned namespaces are retained after failures or TTL expiry until explicitly
+deleted through the portal/API. The leased worker removes only owned namespaces
+and reports completion after absence is observed; see the [local lifecycle
+runbook](../docs/demo.md#4-delete-safely-and-verify-absence). Automatic expiration
+cleanup is not implemented. Deleting the entire disposable kind cluster above is
+a separate manual lab reset, not the platform deletion workflow.

@@ -2,7 +2,7 @@
 
 A hands-on internal developer platform for provisioning development environments, deploying a sample application, and understanding operational status through a self-service portal.
 
-> **Project status:** Persistent requests now support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal can request the approved sample and lists environments with details, operation history, progress, and sanitized failures. Deletion, expiration cleanup, authentication, and production readiness are not implemented.
+> **Project status:** Persistent requests support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal supports create → observe → delete, with confirmation and ownership-checked asynchronous namespace removal. Expiration cleanup, authentication/authorization, continuous health monitoring, and production deployment hardening remain unimplemented. This is a production-minded lifecycle slice, not overall production readiness.
 >
 > Except where marked as available now, this README preserves the intended architecture and delivery blueprint, not a claim that the full platform is implemented.
 >
@@ -12,13 +12,13 @@ A hands-on internal developer platform for provisioning development environments
 
 | Implemented now | Future work, not demo claims |
 |---|---|
-| Portal creation for the approved sample; requests are validated and idempotently persisted in PostgreSQL | Deletion workflow |
+| Portal creation and guarded asynchronous deletion; durable requests and ownership checks | Production deployment hardening |
 | Opt-in leased worker provisioning an approved sample in local kind | Expiration cleanup and continuous post-provisioning health monitoring |
 | Portal with page-local status counts, creation, details, and durable operation timelines | Authentication, production RBAC, and multi-user hardening |
 | Loading/error/retry states, sanitized failures, and request correlation | Custom templates/images, Services, and ingress |
 
 **Start here:** [local demo and troubleshooting runbook](docs/demo.md) for the
-repeatable request → provision → observe walkthrough, safe replay, and manual
+repeatable request → provision → observe → delete walkthrough, safe replay, and manual
 lab reset. See [backend setup](backend/README.md#run-locally) and
 [frontend setup](frontend/README.md) for service-specific commands.
 
@@ -76,13 +76,18 @@ The portal submits creation requests through the existing API; it does not acces
 7. The portal displays progress while the worker checks readiness.
 8. The environment becomes ready, or the operation reports a useful failure.
 
-### Delete an environment (planned)
+### Delete an environment (available journey)
 
-1. The developer requests deletion.
-2. The backend records a deletion operation.
+1. The developer confirms deletion of a ready or failed environment in its detail view.
+2. The backend records a deletion operation atomically; repeat submissions reuse active work.
 3. The worker verifies platform ownership of the target namespace.
 4. The worker requests namespace deletion.
 5. The platform confirms removal before reporting completion.
+
+Creation in progress cannot be deleted. Deletion retains environment and operation
+records for inspection. A failed deletion can be requested again after correcting
+the cause; ownership failures must never be bypassed. These resource-ownership
+checks are not user authorization: the lab still assumes trusted local callers.
 
 ### Expire an environment (planned)
 
@@ -241,10 +246,11 @@ This is a planned structure. Directories will be introduced as their functionali
 The directories above now have starter files or explicit placeholders.
 The backend base package is `io.github.dcfaight.platformlab`.
 The frontend provides an environment creation and status portal. The backend requires PostgreSQL and
-implements persistent environment creation requests and environment/operation
+implements persistent environment creation/deletion requests and environment/operation
 reads, with Flyway migrations and durable idempotency. An opt-in worker provisions
-an approved sample workload only in the dedicated local kind cluster. Cleanup
-and deletion remain unimplemented; Kubernetes is not required for API-only use.
+an approved sample workload only in the dedicated local kind cluster and safely
+removes owned namespaces. Automatic expiration cleanup remains unimplemented;
+Kubernetes is not required for API-only acceptance and reads.
 Area README files describe the current scope.
 `docs/decisions/` and `docs/runbooks/` are reserved for future operational documentation.
 
@@ -409,8 +415,8 @@ The initial demo accesses the sample application through a documented local port
 
 ## 12. Frontend Experience
 
-The list, creation form, and detail/history experience are available now. Deletion
-controls remain part of the intended blueprint, not the current portal.
+The list, creation form, detail/history, and confirmed deletion experience are
+available now.
 
 ### Environment list
 
@@ -431,7 +437,7 @@ controls remain part of the intended blueprint, not the current portal.
 - Latest observed readiness.
 - Operation history.
 - Sanitized diagnostic events.
-- Delete confirmation (planned; no destructive actions are exposed now).
+- Delete confirmation, pending/failed outcomes, and durable deletion history.
 
 The UI distinguishes “request accepted,” “resources created,” and “application ready.”
 
@@ -514,7 +520,8 @@ Select an environment to see its details, paginated operation history, recorded
 progress steps/events, attempt count, lifecycle timestamps, request correlation,
 and sanitized failure summaries. Views refresh every 10 seconds or on demand;
 failed refreshes explicitly retain the last loaded data. Times use the browser's
-local timezone. There is no deletion or authentication.
+local timezone. Eligible environments expose a guarded delete action in detail;
+acceptance is not completed removal. There is no authentication or user authorization.
 
 With the worker disabled, the portal honestly shows `REQUESTED` / `PENDING`;
 enable the optional local-kind worker to observe provisioning and readiness.
@@ -640,7 +647,7 @@ Any reported performance results will include the test environment and method.
 
 ### Milestone 3: Safe lifecycle
 
-- Implement deletion.
+- Implement deletion (available; see the API contract and local runbook).
 - Add expiration cleanup.
 - Test retries and worker restart recovery.
 - Add ownership safeguards.

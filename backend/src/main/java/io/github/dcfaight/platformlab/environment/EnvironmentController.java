@@ -6,6 +6,7 @@ import jakarta.validation.Valid;
 import java.net.URI;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -41,6 +42,13 @@ public class EnvironmentController {
     @GetMapping("/{id}")
     public EnvironmentResponse get(@PathVariable String id) {
         return service.get(ApiIds.parse(id));
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<AcceptedEnvironmentResponse> delete(@PathVariable String id) {
+        var result = service.delete(ApiIds.parse(id));
+        return ResponseEntity.accepted().location(URI.create("/api/v1/operations/" + result.operationId()))
+                .body(result);
     }
 
     @GetMapping("/{id}/operations")

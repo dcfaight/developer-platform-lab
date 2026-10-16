@@ -426,6 +426,112 @@ class PlatformLabApplicationTests {
         assertCounts(1);
     }
 
+    @Test
+    void deleteValidatesIdsAndRejectsCreateRacesAndDeletedEnvironments() throws Exception {
+        assertError(delete("not-a-uuid"), 400);
+        assertError(delete(UUID.randomUUID().toString()), 404);
+        var created = post("delete-conflicts", payload("Delete conflicts", 8));
+        UUID id = UUID.fromString(uuid(created.json(), "environmentId"));
+        for (String status : List.of("REQUESTED", "PROVISIONING", "DELETED")) {
+            jdbc.update("UPDATE environments SET status = ? WHERE id = ?", status, id);
+            assertError(delete(id.toString()), 409);
+        }
+        assertCounts(1);
+    }
+
+    @Test
+    void concurrentDeletesReuseOneDurableOperationAndReturnItsCurrentStatus() throws Exception {
+        var created = post("delete-concurrent", payload("Concurrent delete", 8));
+        UUID id = UUID.fromString(uuid(created.json(), "environmentId"));
+        finishCreation(id, "READY");
+        var executor = Executors.newFixedThreadPool(4);
+        var barrier = new CyclicBarrier(4);
+        try {
+            var tasks = java.util.stream.IntStream.range(0, 4)
+                    .<java.util.concurrent.Callable<ApiResponse>>mapToObj(index -> () -> {
+                        barrier.await(10, TimeUnit.SECONDS);
+                        return delete(id.toString());
+                    }).toList();
+            String operationId = null;
+            for (var future : executor.invokeAll(tasks, 30, TimeUnit.SECONDS)) {
+                var accepted = future.get();
+                assertEquals(202, accepted.status(), accepted.body());
+                assertEquals("DELETING", accepted.json().path("environmentStatus").asText());
+                assertEquals("PENDING", accepted.json().path("operationStatus").asText());
+                String currentId = uuid(accepted.json(), "operationId");
+                if (operationId != null) {
+                    assertEquals(operationId, currentId);
+                }
+                operationId = currentId;
+                assertEquals("/api/v1/operations/" + currentId, accepted.header("Location"));
+            }
+            UUID durableId = UUID.fromString(operationId);
+            jdbc.update("UPDATE operations SET status = 'RUNNING' WHERE id = ?", durableId);
+            var repeat = delete(id.toString());
+            assertEquals(202, repeat.status());
+            assertEquals(operationId, uuid(repeat.json(), "operationId"));
+            assertEquals("RUNNING", repeat.json().path("operationStatus").asText());
+            assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
+            assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+            assertEquals("ENVIRONMENT_DELETE_REQUESTED", jdbc.queryForObject(
+                    "SELECT action FROM audit_events WHERE operation_id = ?", String.class, durableId));
+            assertThrows(org.springframework.dao.DataIntegrityViolationException.class, () ->
+                    jdbc.update("""
+                            INSERT INTO operations (id, environment_id, type, status,
+                                next_attempt_at, created_at, updated_at)
+                            VALUES (?, ?, 'DELETE_ENVIRONMENT', 'PENDING', now(), now(), now())
+                            """, UUID.randomUUID(), id));
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void failedDeleteCanBeRetriedWithoutErasingHistory() throws Exception {
+        var created = post("delete-retry", payload("Retry delete", 8));
+        UUID id = UUID.fromString(uuid(created.json(), "environmentId"));
+        finishCreation(id, "FAILED");
+        var first = delete(id.toString());
+        UUID firstOperation = UUID.fromString(uuid(first.json(), "operationId"));
+        jdbc.update("UPDATE operations SET status = 'FAILED', completed_at = now() WHERE id = ?", firstOperation);
+        jdbc.update("UPDATE environments SET status = 'DELETE_FAILED' WHERE id = ?", id);
+        var retry = delete(id.toString());
+        assertEquals(202, retry.status());
+        assertNotEquals(firstOperation.toString(), uuid(retry.json(), "operationId"));
+        var history = get("/api/v1/environments/" + id + "/operations");
+        assertEquals(3, history.json().path("totalElements").asInt());
+        assertEquals("FAILED", get("/api/v1/operations/" + firstOperation).json().path("status").asText());
+    }
+
+    @Test
+    void deletionAuditFailureRollsBackOperationAndEnvironmentState() throws Exception {
+        var created = post("delete-rollback", payload("Rollback delete", 8));
+        UUID id = UUID.fromString(uuid(created.json(), "environmentId"));
+        finishCreation(id, "READY");
+        jdbc.execute("""
+                ALTER TABLE audit_events ADD CONSTRAINT test_reject_delete
+                CHECK (action <> 'ENVIRONMENT_DELETE_REQUESTED') NOT VALID
+                """);
+        try {
+            assertError(delete(id.toString()), 500);
+            assertEquals("READY", get("/api/v1/environments/" + id).json().path("status").asText());
+            assertCounts(1);
+        } finally {
+            jdbc.execute("ALTER TABLE audit_events DROP CONSTRAINT test_reject_delete");
+        }
+        assertEquals(202, delete(id.toString()).status());
+    }
+
+    private void finishCreation(UUID id, String status) {
+        jdbc.update("UPDATE operations SET status = ?, completed_at = now() WHERE environment_id = ?",
+                "READY".equals(status) ? "SUCCEEDED" : "FAILED", id);
+        jdbc.update("UPDATE environments SET status = ? WHERE id = ?", status, id);
+    }
+
+    private ApiResponse delete(String id) throws Exception {
+        return request(port, "DELETE", "/api/v1/environments/" + id, null, Map.of());
+    }
+
     private void assertAtomicRollback(String table) throws Exception {
         String constraint = "test_reject_create";
         jdbc.execute("ALTER TABLE " + table + " ADD CONSTRAINT " + constraint + " CHECK (false) NOT VALID");

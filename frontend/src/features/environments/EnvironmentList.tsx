@@ -22,8 +22,8 @@ export function EnvironmentList({ page, onPageChange }: {
         <p className="muted">This page only · {data.items.length} {data.items.length === 1 ? 'environment' : 'environments'} · Last recorded readiness, not live health</p>
         <dl className="summary-grid">
           <div><dt>Ready</dt><dd>{data.items.filter((item) => item.status === 'READY').length}</dd></div>
-          <div><dt>In progress</dt><dd>{data.items.filter((item) => ['REQUESTED', 'PROVISIONING'].includes(item.status)).length}</dd></div>
-          <div><dt>Failed</dt><dd>{data.items.filter((item) => item.status === 'FAILED').length}</dd></div>
+          <div><dt>In progress</dt><dd>{data.items.filter((item) => ['REQUESTED', 'PROVISIONING', 'DELETING'].includes(item.status)).length}</dd></div>
+          <div><dt>Failed</dt><dd>{data.items.filter((item) => ['FAILED', 'DELETE_FAILED'].includes(item.status)).length}</dd></div>
         </dl>
       </section>}
       {data.items.length === 0

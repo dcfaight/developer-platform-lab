@@ -7,14 +7,15 @@ The server binds to http://127.0.0.1:8080.
 The persistent slice stores environments, operations, idempotency reservations,
 and audit events in PostgreSQL, with Flyway migrations applied on startup.
 See the [API contract](../docs/api.md) for schemas and validation.
-An opt-in worker claims create operations with PostgreSQL leases, provisions
+An opt-in worker claims create and delete operations with PostgreSQL leases, provisions
 platform-owned namespaces and an approved sample Deployment in local kind,
 and records durable progress and sanitized failures in operation detail.
 Acceptance remains `REQUESTED` / `PENDING`; only observed workload readiness
-permits `READY`. There is no deletion or expiration cleanup.
+permits `READY`. Deletion is explicit; TTL expiration does not trigger cleanup.
 Omitted or `null` TTL defaults to eight hours.
-The [read-only frontend portal](../frontend/README.md) consumes environment
-list/detail reads and paginated operation history. Environment responses include
+The [frontend portal](../frontend/README.md) supports environment creation,
+confirmed deletion, list/detail reads, and paginated operation history. It uses
+only the backend API and never accesses Kubernetes directly. Environment responses include
 a nullable latest-operation summary; existing operation detail fields are unchanged.
 
 ## Run locally
@@ -97,10 +98,92 @@ Operation detail retains UTC timestamps, attempt counts, sanitized messages,
 and progress events. Lease expiry permits at-least-once execution; idempotent
 Kubernetes reconciliation and database fencing protect repeated work.
 
+## Safe asynchronous deletion
+
+`DELETE /api/v1/environments/{id}` returns `202 Accepted`, a `Location` pointing
+to `/api/v1/operations/{operationId}`, and an `AcceptedEnvironmentResponse`:
+
+```json
+{"environmentId":"<uuid>","operationId":"<uuid>","environmentStatus":"DELETING","operationStatus":"PENDING"}
+```
+
+No request body or idempotency key is required. Environment row locks and a
+partial unique active-operation index serialize concurrent requests. Repeats
+reuse the active `DELETE_ENVIRONMENT` operation and return its durable `PENDING`
+or `RUNNING` status. `REQUESTED`, `PROVISIONING`, and `DELETED` return `409`;
+`READY`, `FAILED`, and `DELETE_FAILED` permit a new deletion. Malformed/unknown
+IDs return `400`/`404`. After terminal failure, retrying creates a new operation
+and audit record without replacing history.
+
+API errors use `INVALID_REQUEST` (`400`, malformed UUID), `NOT_FOUND` (`404`),
+`ENVIRONMENT_STATE_CONFLICT` (`409`, disallowed state or active create), and
+`INVALID_ENVIRONMENT_NAMESPACE` (`409`, noncanonical persisted namespace).
+
+The worker requires the canonical namespace, matching managed-by/environment
+labels **and** annotations, and a persisted original CREATE operation. Newly
+provisioned namespaces additionally carry the original operation ID in the
+`platform-lab/create-operation-id` label and annotation. If either marker is
+present, both must match that persisted original operation; partial or mismatched
+markers fail with `KUBERNETES_OWNERSHIP_CONFLICT`.
+
+For compatibility with existing platform environments, deletion also accepts
+the original ownership scheme when **both** create-operation markers are absent.
+All canonical-name, managed/environment label/annotation, persisted-original-
+operation, lease, and UID/resourceVersion checks still apply. No namespace is
+relabelled or adopted. Missing managed/environment ownership or a missing original
+CREATE operation fails closed, including for legacy namespaces. Namespace DELETE
+requests include both UID and resourceVersion preconditions; ownership races
+are retried after a fresh read, never by forcing deletion.
+
+Accepted Kubernetes deletion is not completion. A terminating namespace stays
+`DELETING` until a subsequent read observes absence, then becomes `DELETED`.
+Transient failures use the existing retry budget/backoff; deletion uses the
+existing `readiness-timeout` as its durable deadline (`DELETION_TIMEOUT`).
+Terminal failure sets `DELETE_FAILED`. Expired leases cannot publish results,
+and lease ownership is rechecked immediately before issuing a Kubernetes
+DELETE. After an accepted DELETE followed by a crash, reclamation reads the
+namespace again, including after the last attempt, rather than recreating
+resources or assuming deletion completed.
+
+There is exactly one original `CREATE_ENVIRONMENT` operation per environment,
+enforced by a unique index. Claims reference that exact operation, with no
+oldest/latest-operation fallback. Missing or mismatched namespace ownership
+fails closed. CREATE execution checks its lease before starting and immediately
+before each namespace/Deployment create or replace. Existing legacy namespaces
+remain readable/reconcilable but are not assigned new create-operation ownership.
+
+Database lease checks and Kubernetes requests are not one atomic transaction.
+A process can pause after its final lease check or leave an HTTP request in
+flight when its lease expires; a late CREATE could therefore finish after
+failure/deletion acceptance. Preflights reduce this window but cannot eliminate
+it: a database lease cannot revoke an in-flight Kubernetes request. The same
+limitation applies to an already-issued DELETE; its UID/resourceVersion
+preconditions protect the inspected namespace, not the database lease.
+Preventing this residual cross-system race requires a Kubernetes-side
+admission/fencing controller or equivalent external coordination. Database
+fencing still prevents stale holders from publishing operation results.
+
+The default deletion deadline is five minutes from the first claim; reclaiming
+does not reset it. `DELETION_TIMEOUT` reports
+`Deletion did not complete within its limits.` Other durable failure codes are
+`KUBERNETES_OWNERSHIP_CONFLICT`, `KUBERNETES_VALIDATION_FAILED`,
+`KUBERNETES_UNAVAILABLE` (retryable), `KUBERNETES_REQUEST_REJECTED`,
+`KUBERNETES_CONFIG_INVALID`, and `INTERNAL_ERROR`. Only absent namespaces can
+complete successfully; no finalizers are removed to force completion.
+
+DELETE crash retries use `max-attempts` until an accepted/terminating namespace
+observation is persisted. An exhausted reclaim performs a final read: absence
+succeeds and termination continues polling, but an active namespace fails with
+`ATTEMPTS_EXHAUSTED` / `Deletion did not complete within its attempt limits.`
+without another DELETE. Normal termination polls do not consume attempts.
+Repeated crashes during reconciliation remain bounded by the original durable
+deadline, including crashes before the accepted DELETE could be persisted.
+
 This slice observes initial Deployment readiness, not ongoing health after
 success. It does not provide custom manifests/images, Services, ingress,
-deletion, automatic cleanup, production RBAC, or authentication. The read-only
-portal displays these API records; it does not create requests or control Kubernetes.
+automatic cleanup, production RBAC, or authentication. The portal supports
+creation and confirmed deletion through the backend API; it has no direct
+Kubernetes access.
 Expired TTL metadata does not remove resources.
 
 ## Manual API checks
@@ -169,6 +252,7 @@ PLATFORM_KIND_TEST=true ./mvnw -Dtest=KindProvisioningTests,KindWorkerFlowTests 
 ```
 
 These tests provision and re-apply a unique namespace/Deployment and exercise
-HTTP acceptance through the worker to real workload readiness (the full-flow
-test also uses Testcontainers PostgreSQL). They leave resources in the disposable
-cluster; use the manual whole-cluster reset in the infrastructure guide when finished.
+HTTP acceptance through the worker to real workload readiness and namespace
+deletion (the full-flow test also uses Testcontainers PostgreSQL). The smaller
+provisioning test leaves resources in the disposable cluster; use the manual
+whole-cluster reset in the infrastructure guide when finished.
