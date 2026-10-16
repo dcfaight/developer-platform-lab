@@ -74,7 +74,15 @@ new dependencies are development-only testing tools.
 
 ## Current limitations
 
-No authentication, filtering, push updates, log stream, or direct Kubernetes
+Browsing is anonymous. Creating and deleting require signing in with an
+`OPERATOR` account from the panel at the top of the portal; the portal verifies the
+credentials with `GET /api/v1/me` and keeps them only in page memory (not
+`localStorage`, `sessionStorage`, or cookies), so reloading or closing the tab
+signs you out. The create and delete buttons stay disabled until an operator is
+signed in. A `401` signs the portal out and keeps the pending creation intent and
+key so it can be retried safely after signing in again; a `403` explains that an
+`OPERATOR` account is required. There is no sign-up, password change, SSO, or
+session timeout. No filtering, push updates, log stream, or direct Kubernetes
 actions are exposed. Expiry metadata alone does not trigger removal; the separate
 [manual cleanup CLI](../automation/README.md) defaults to dry-run and requires
 explicit `--execute`. The portal does not invoke expiration cleanup.
@@ -85,4 +93,6 @@ multi-user service. No consistent snapshot across separate HTTP requests is prom
 `npm run build` creates static assets in `dist/`. Vite's API proxy is for local
 development; serving that bundle elsewhere requires a same-origin reverse proxy
 for `/api/v1` to the backend. Vite preview alone is not a production deployment.
-Keep both services local/trusted; this PR does not add a production security boundary.
+Keep both services local/trusted. Credentials are sent as HTTP Basic on each
+mutation, so any non-loopback deployment would additionally need TLS; this is not
+a production security boundary.

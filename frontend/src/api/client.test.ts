@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, createEnvironment, deleteEnvironment, environment, environmentPage, operationPage, read } from './client'
-import { demoEnvironment, demoOperation, json, paged } from '../test/fixtures'
+import { ApiError, createEnvironment, deleteEnvironment, environment, environmentPage, operationPage, read, signIn } from './client'
+import { getSession, setSession } from './session'
+import { demoEnvironment, demoOperation, json, operatorSession, paged } from '../test/fixtures'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -179,5 +180,67 @@ describe('read-only API boundary', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('operator credentials', () => {
+  afterEach(() => setSession(null))
+
+  it('verifies credentials against /api/v1/me and keeps them only in memory', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(json({ username: 'alice', roles: ['OPERATOR'] }))
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await signIn('alice', 'test-only-alice-pass')).toEqual({ username: 'alice', roles: ['OPERATOR'] })
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/me', { headers: {
+      Accept: 'application/json', Authorization: operatorSession.authorization } })
+    expect(getSession()).toEqual(operatorSession)
+    expect(window.sessionStorage.length).toBe(0)
+    expect(window.localStorage.length).toBe(0)
+  })
+
+  it('accepts the configured spelling of a case-insensitively matched account', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ username: 'alice', roles: ['OPERATOR'] })))
+    expect(await signIn('Alice', 'test-only-alice-pass')).toEqual({ username: 'alice', roles: ['OPERATOR'] })
+    expect(getSession()?.identity.username).toBe('alice')
+  })
+
+  it('rejects invalid input, wrong credentials, and mismatched identities without a session', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({ code: 'UNAUTHENTICATED', requestId: 'request-401' }, 401))
+      .mockResolvedValueOnce(json({ username: 'mallory', roles: ['OPERATOR'] }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(signIn('alice:x', 'pw')).rejects.toThrow('valid username')
+    await expect(signIn('alice', '')).rejects.toThrow('valid username')
+    expect(fetchMock).not.toHaveBeenCalled()
+    await expect(signIn('alice', 'wrong')).rejects.toMatchObject({ code: 'UNAUTHENTICATED' })
+    await expect(signIn('alice', 'pw')).rejects.toThrow('unexpected sign-in response')
+    expect(getSession()).toBeNull()
+  })
+
+  it('sends the operator credential on mutations and never on reads', async () => {
+    setSession(operatorSession)
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json(paged([demoEnvironment])))
+      .mockResolvedValueOnce(json({ environmentId: demoEnvironment.id, operationId: demoOperation.id,
+        environmentStatus: 'DELETING', operationStatus: 'PENDING' }, 202))
+    vi.stubGlobal('fetch', fetchMock)
+    await read('/environments', environmentPage)
+    await deleteEnvironment(demoEnvironment.id)
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({ Accept: 'application/json' })
+    expect(fetchMock.mock.calls[1]?.[1]?.headers).toEqual({
+      Accept: 'application/json', Authorization: operatorSession.authorization })
+  })
+
+  it('clears the session on 401 and reports 403 as a definite, non-retryable-by-default rejection', async () => {
+    setSession(operatorSession)
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(json({ code: 'FORBIDDEN', requestId: 'request-403' }, 403))
+      .mockResolvedValueOnce(json({ code: 'UNAUTHENTICATED', requestId: 'request-401' }, 401)))
+    const payload = { name: 'demo', templateId: 'sample-service' as const, ttlHours: 8 }
+    await expect(createEnvironment(payload, 'key')).rejects.toMatchObject({
+      code: 'FORBIDDEN', requestId: 'request-403', outcomeUncertain: false })
+    expect(getSession()).toEqual(operatorSession)
+    await expect(createEnvironment(payload, 'key')).rejects.toMatchObject({
+      code: 'UNAUTHENTICATED', requestId: 'request-401', outcomeUncertain: false })
+    expect(getSession()).toBeNull()
   })
 })

@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -31,8 +32,8 @@ public class EnvironmentController {
     @PostMapping
     public ResponseEntity<AcceptedEnvironmentResponse> create(
             @RequestHeader(value = "Idempotency-Key", required = false) String key,
-            @Valid @RequestBody CreateEnvironmentRequest request) {
-        var result = service.create(key, request);
+            @Valid @RequestBody CreateEnvironmentRequest request, Authentication authentication) {
+        var result = service.create(key, request, authentication.getName());
         return ResponseEntity.accepted().location(URI.create("/api/v1/operations/" + result.operationId()))
                 .body(result);
     }
@@ -50,7 +51,7 @@ public class EnvironmentController {
 
     @DeleteMapping("/{id}")
     public ResponseEntity<AcceptedEnvironmentResponse> delete(@PathVariable String id,
-            @RequestParam(required = false) String expiredBefore) {
+            @RequestParam(required = false) String expiredBefore, Authentication authentication) {
         Instant cutoff = null;
         if (expiredBefore != null) {
             try {
@@ -60,7 +61,13 @@ public class EnvironmentController {
                         "expiredBefore must be an ISO instant with a timezone.");
             }
         }
-        var result = service.delete(ApiIds.parse(id), cutoff);
+        if (cutoff == null && authentication.getAuthorities().stream()
+                .noneMatch(authority -> "ROLE_OPERATOR".equals(authority.getAuthority()))) {
+            // Defense in depth for the HTTP security rules: only operators may skip the expiry guard.
+            throw new ApiException(HttpStatus.FORBIDDEN, "FORBIDDEN",
+                    "The authenticated user is not permitted to perform this operation.");
+        }
+        var result = service.delete(ApiIds.parse(id), cutoff, authentication.getName());
         return ResponseEntity.accepted().location(URI.create("/api/v1/operations/" + result.operationId()))
                 .body(result);
     }

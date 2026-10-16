@@ -6,7 +6,9 @@ from datetime import datetime, timedelta, timezone
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
+import base64
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -30,6 +32,15 @@ OTHER = "22222222-2222-4222-8222-222222222222"
 THIRD = "33333333-3333-4333-8333-333333333333"
 OPERATION = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 SECRET = "sensitive-response-body-do-not-print"
+CLEANUP_USER = "cleanup-bot"
+CLEANUP_PASSWORD = "test-only-cleanup-password"
+CREDENTIALS = {
+    "PLATFORM_CLEANUP_USERNAME": CLEANUP_USER,
+    "PLATFORM_CLEANUP_PASSWORD": CLEANUP_PASSWORD,
+}
+EXPECTED_AUTHORIZATION = "Basic " + base64.b64encode(
+    f"{CLEANUP_USER}:{CLEANUP_PASSWORD}".encode()
+).decode()
 
 
 def item(identity=IDENTITY, state="READY", expires=STAMP, **changes):
@@ -651,6 +662,45 @@ class ArgumentTests(unittest.TestCase):
         self.assertEqual(args.request_timeout, 60)
 
 
+class CredentialTests(unittest.TestCase):
+    def test_basic_authorization_uses_environment_values(self):
+        self.assertEqual(cleanup.basic_authorization(CREDENTIALS), EXPECTED_AUTHORIZATION)
+
+    def test_invalid_credentials_are_rejected_without_echoing_values(self):
+        for environ in (
+            {}, {"PLATFORM_CLEANUP_USERNAME": CLEANUP_USER},
+            {**CREDENTIALS, "PLATFORM_CLEANUP_PASSWORD": ""},
+            {**CREDENTIALS, "PLATFORM_CLEANUP_PASSWORD": "x" * 1025},
+            {**CREDENTIALS, "PLATFORM_CLEANUP_USERNAME": "-leading"},
+            {**CREDENTIALS, "PLATFORM_CLEANUP_USERNAME": "a:b"},
+        ):
+            with self.subTest(environ=sorted(environ)):
+                with self.assertRaises(ValueError) as raised:
+                    cleanup.basic_authorization(environ)
+                self.assertNotIn(CLEANUP_PASSWORD, str(raised.exception))
+
+    def test_execute_requires_credentials_before_any_network(self):
+        with patch.object(cleanup.Client, "__init__", side_effect=AssertionError("network")):
+            with patch("sys.stderr"):
+                self.assertEqual(cleanup.main(["--execute"], environ={}), 2)
+
+    def test_delete_alone_carries_authorization(self):
+        client = cleanup.Client(cleanup.arguments(["--execute"]), EXPECTED_AUTHORIZATION)
+        for method, path, expected in (
+            ("GET", "/environments", {"Accept": "application/json"}),
+            ("DELETE", "/environments/" + IDENTITY,
+             {"Accept": "application/json", "Authorization": EXPECTED_AUTHORIZATION}),
+        ):
+            with self.subTest(method=method):
+                with patch.object(cleanup.http.client, "HTTPConnection") as connection_type:
+                    connection = connection_type.return_value
+                    connection.getresponse.return_value.status = 200 if method == "GET" else 202
+                    connection.getresponse.return_value.read.return_value = b"{}"
+                    connection.getresponse.return_value.getheader.return_value = None
+                    client.once(method, path)
+                connection.request.assert_called_once_with(method, "/api/v1" + path, headers=expected)
+
+
 class ClientTests(unittest.TestCase):
     def make_client(self, attempts=3):
         return cleanup.Client(cleanup.arguments(["--get-attempts", str(attempts)]))
@@ -752,11 +802,16 @@ class ClientTests(unittest.TestCase):
 
 
 class HttpCliTests(unittest.TestCase):
-    def cli(self, url, *flags, timeout=6):
+    def cli(self, url, *flags, timeout=6, credentials=CREDENTIALS):
+        environment = {
+            key: value for key, value in os.environ.items()
+            if key not in CREDENTIALS
+        }
+        environment.update(credentials)
         return subprocess.run(
             [sys.executable, str(SCRIPT), "--api-base-url", url, "--json",
              "--connect-timeout", "0.3", "--request-timeout", "0.3", *flags],
-            capture_output=True, text=True, timeout=timeout, check=False,
+            capture_output=True, text=True, timeout=timeout, check=False, env=environment,
         )
 
     def summary(self, process, expected=0):
@@ -773,13 +828,15 @@ class HttpCliTests(unittest.TestCase):
                 with http_server(lambda handler, n: (
                     200, page([item(expires="2000-01-01T00:00:00Z")]), {}
                 )) as (url, requests):
-                    result = self.summary(self.cli(url, *flags))
+                    # Dry-run is read-only and needs no credentials.
+                    result = self.summary(self.cli(url, *flags, credentials={}))
                 self.assertEqual(result["mode"], "dry-run")
                 self.assertEqual(result["selectedIds"], [IDENTITY])
                 self.assertEqual([(method, path) for method, path, _ in requests], [
                     ("GET", "/api/v1/environments?page=0&size=20"),
                 ])
                 self.assertEqual(requests[0][2]["Accept"], "application/json")
+                self.assertNotIn("Authorization", requests[0][2])
 
     def test_subprocess_execute_rechecks_and_sends_atomic_expiry_query(self):
         def responder(handler, number):
@@ -800,6 +857,51 @@ class HttpCliTests(unittest.TestCase):
         self.assertEqual(result["acceptedOperations"], [{
             "environmentId": IDENTITY, "operationId": OPERATION, "source": "202",
         }])
+        self.assertNotIn("Authorization", requests[0][2])
+        self.assertNotIn("Authorization", requests[1][2])
+        self.assertEqual(requests[2][2]["Authorization"], EXPECTED_AUTHORIZATION)
+        self.assertNotIn(CLEANUP_PASSWORD, json.dumps(result))
+
+    def test_subprocess_execute_without_credentials_exits_before_network(self):
+        for credentials in (
+            {},
+            {"PLATFORM_CLEANUP_USERNAME": CLEANUP_USER},
+            {"PLATFORM_CLEANUP_PASSWORD": CLEANUP_PASSWORD},
+            {**CREDENTIALS, "PLATFORM_CLEANUP_PASSWORD": ""},
+            {**CREDENTIALS, "PLATFORM_CLEANUP_USERNAME": "user:with-colon"},
+        ):
+            with self.subTest(credentials=sorted(credentials)):
+                with http_server(lambda handler, n: (200, page([]), {})) as (url, requests):
+                    process = self.cli(url, "--execute", credentials=credentials)
+                self.assertEqual(process.returncode, 2)
+                self.assertEqual(process.stdout, "")
+                self.assertIn("PLATFORM_CLEANUP_USERNAME", process.stderr)
+                self.assertNotIn(CLEANUP_PASSWORD, process.stderr)
+                self.assertNotIn("Traceback", process.stderr)
+                self.assertEqual(requests, [])
+
+    def test_subprocess_rejected_credentials_fail_without_retrying_delete(self):
+        for status, code in ((401, "UNAUTHENTICATED"), (403, "FORBIDDEN")):
+            with self.subTest(status=status):
+                def responder(handler, number):
+                    if handler.command == "DELETE":
+                        return status, {"code": code, "message": SECRET}, {"X-Request-Id": "auth-1"}
+                    if number == 1:
+                        return 200, page([item(expires="2000-01-01T00:00:00Z")]), {}
+                    return 200, item(expires="2000-01-01T00:00:00Z"), {}
+
+                with http_server(responder) as (url, requests):
+                    result = self.summary(self.cli(url, "--execute"), 1)
+                self.assertEqual(result["failed"], 1)
+                self.assertEqual(result["unknown"], 0)
+                self.assertEqual(result["requested"], 0)
+                self.assertEqual(result["errors"], [{
+                    "code": code, "httpStatus": status, "requestId": "auth-1",
+                    "environmentId": IDENTITY,
+                }])
+                self.assertEqual(
+                    [method for method, _, _ in requests], ["GET", "GET", "DELETE", "GET"]
+                )
 
     def test_subprocess_rejects_invalid_arguments_without_contacting_server(self):
         with http_server(lambda handler, n: (200, page([]), {})) as (url, requests):

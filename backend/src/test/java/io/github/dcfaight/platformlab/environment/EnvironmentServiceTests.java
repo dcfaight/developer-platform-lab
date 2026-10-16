@@ -46,7 +46,7 @@ class EnvironmentServiceTests {
         when(environments.lock(id)).thenReturn(Optional.of(new EnvironmentRecord(id, "bad", "default",
                 "sample-service", "READY", now.plusSeconds(3600), now, now)));
         var service = new EnvironmentService(environments, operations, idempotency, audit, Clock.systemUTC());
-        assertThrows(ApiException.class, () -> service.delete(id));
+        assertThrows(ApiException.class, () -> service.delete(id, "alice"));
         verifyNoInteractions(operations, audit, idempotency);
     }
 
@@ -64,11 +64,28 @@ class EnvironmentServiceTests {
         var service = new EnvironmentService(environments, operations, idempotency, audit,
                 Clock.fixed(now, ZoneId.of("Asia/Tokyo")));
 
-        var future = assertThrows(ApiException.class, () -> service.delete(id, now.plusNanos(1)));
+        var future = assertThrows(ApiException.class, () -> service.delete(id, now.plusNanos(1), "cleanup-bot"));
         assertEquals(HttpStatus.BAD_REQUEST, future.status());
         assertEquals("INVALID_REQUEST", future.code());
         verifyNoInteractions(environments, operations, audit, idempotency);
-        assertEquals("DELETING", service.delete(id, now).environmentStatus());
+        var accepted = service.delete(id, now, "cleanup-bot");
+        assertEquals("DELETING", accepted.environmentStatus());
+        org.mockito.Mockito.verify(audit).recordDeletion(eq(id), eq(accepted.operationId()), eq("cleanup-bot"), any());
+    }
+
+    @Test
+    void mutationsRequireAnAuthenticatedActorBeforeAnyWrite() {
+        var environments = mock(EnvironmentRepository.class);
+        var operations = mock(OperationRepository.class);
+        var idempotency = mock(IdempotencyRepository.class);
+        var audit = mock(AuditRepository.class);
+        var service = new EnvironmentService(environments, operations, idempotency, audit, Clock.systemUTC());
+        var request = new CreateEnvironmentRequest("No actor", "sample-service", 1);
+        for (String actor : new String[] {null, "", "  "}) {
+            assertThrows(IllegalArgumentException.class, () -> service.create("no-actor", request, actor));
+            assertThrows(IllegalArgumentException.class, () -> service.delete(UUID.randomUUID(), actor));
+        }
+        verifyNoInteractions(environments, operations, idempotency, audit);
     }
 
     private void assertCreationTimestamps(Integer suppliedTtl, int expectedTtl) {
@@ -83,14 +100,15 @@ class EnvironmentServiceTests {
         when(idempotency.reserve(eq("fixed-clock"), eq(request), any(), any())).thenReturn(true);
         var service = new EnvironmentService(environments, operations, idempotency, audit, clock);
 
-        AcceptedEnvironmentResponse response = service.create("fixed-clock", request);
+        AcceptedEnvironmentResponse response = service.create("fixed-clock", request, "alice");
 
         var recordCaptor = ArgumentCaptor.forClass(EnvironmentRecord.class);
         var ordered = inOrder(idempotency, environments, operations, audit);
         ordered.verify(idempotency).reserve("fixed-clock", request, response.environmentId(), response.operationId());
         ordered.verify(environments).insert(recordCaptor.capture());
         ordered.verify(operations).insert(response.operationId(), response.environmentId(), persistedInstant);
-        ordered.verify(audit).recordCreation(response.environmentId(), response.operationId(), persistedInstant);
+        ordered.verify(audit).recordCreation(response.environmentId(), response.operationId(), "alice",
+                persistedInstant);
         ordered.verifyNoMoreInteractions();
         EnvironmentRecord environment = recordCaptor.getValue();
         assertEquals(response.environmentId(), environment.id());

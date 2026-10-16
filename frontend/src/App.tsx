@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { EnvironmentDetail } from './features/environments/EnvironmentDetail'
 import { CreateEnvironment } from './features/environments/CreateEnvironment'
 import { EnvironmentList } from './features/environments/EnvironmentList'
+import { AccountPanel } from './features/session/AccountPanel'
 import './App.css'
 
 function App() {
@@ -28,11 +29,12 @@ function App() {
         <p>Follow environment readiness, operation progress, and failures in one place.</p>
         <p className="muted">Status refreshes every 10 seconds. All times are shown in your local timezone.</p>
       </div>
+      <AccountPanel />
       {match ? <EnvironmentDetail key={match[1]} id={match[1]} />
         : creating ? <CreateEnvironment />
           : <EnvironmentList page={page} onPageChange={setPage} />}
     </main>
-    <footer>Work-in-progress portfolio blueprint · Trusted local use only · No authentication controls</footer>
+    <footer>Work-in-progress portfolio blueprint · Trusted local use only · Operator sign-in required for changes · Not production hardened</footer>
   </div>
 }
 

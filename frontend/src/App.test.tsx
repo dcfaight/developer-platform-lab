@@ -3,7 +3,8 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { REFRESH_INTERVAL } from './api/useResource'
-import { demoEnvironment, demoOperation, json, paged } from './test/fixtures'
+import { setSession } from './api/session'
+import { demoEnvironment, demoOperation, json, operatorSession, paged } from './test/fixtures'
 
 beforeEach(() => window.history.replaceState(null, '', '/'))
 afterEach(() => {
@@ -11,6 +12,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   window.sessionStorage.clear()
+  setSession(null)
 })
 
 function mockPortal(operation = demoOperation) {
@@ -59,7 +61,10 @@ describe('portal', () => {
   })
 
   describe('environment creation', () => {
-    beforeEach(() => stubCreationKey('create-key-1', 'create-key-2'))
+    beforeEach(() => {
+      stubCreationKey('create-key-1', 'create-key-2')
+      setSession(operatorSession)
+    })
 
     it('offers an accessible form with approved template, default lifetime, and safety guidance', async () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(paged([]))))
@@ -464,5 +469,90 @@ describe('portal', () => {
     await screen.findByRole('link', { name: 'Current page' })
     await act(async () => resolve(json(paged([{ ...demoEnvironment, name: 'Old response' }]))))
     expect(screen.queryByRole('link', { name: 'Old response' })).toBeNull()
+  })
+})
+
+describe('operator sign-in', () => {
+  function identityPortal(me: () => Promise<Response>, post?: () => Promise<Response>) {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/v1/me') return me()
+      if (init?.method === 'POST' && post) return post()
+      if (url.includes(`/environments/${demoEnvironment.id}/operations?`)) return json(paged([demoOperation]))
+      if (url.includes(`/environments/${demoEnvironment.id}`)) return json(demoEnvironment)
+      return json(paged([]))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  async function signInThroughPortal(username = 'alice', password = 'test-only-alice-pass') {
+    await userEvent.type(screen.getByLabelText('Username'), username)
+    await userEvent.type(screen.getByLabelText('Password'), password)
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+  }
+
+  it('keeps browsing open but disables creation until an operator signs in, holding credentials only in memory', async () => {
+    const fetchMock = identityPortal(async () => json({ username: 'alice', roles: ['OPERATOR'] }))
+    window.history.replaceState(null, '', '/#create')
+    render(<App />)
+    expect(screen.getByText(/Sign in with an OPERATOR account/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Create environment' })).toHaveProperty('disabled', true)
+    await signInThroughPortal()
+    expect(await screen.findByText(/Signed in as/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Create environment' })).toHaveProperty('disabled', false)
+    const me = fetchMock.mock.calls.find(([url]) => url === '/api/v1/me')
+    expect((me?.[1]?.headers as Record<string, string> | undefined)?.Authorization).toBe(operatorSession.authorization)
+    expect(screen.getByLabelText('Environment name')).toBeTruthy()
+    expect(window.sessionStorage.length).toBe(0)
+    expect(window.localStorage.length).toBe(0)
+    expect(document.cookie).toBe('')
+    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+    expect(screen.getByRole('button', { name: 'Create environment' })).toHaveProperty('disabled', true)
+  })
+
+  it('reports rejected credentials without signing in', async () => {
+    identityPortal(async () => json({ code: 'UNAUTHENTICATED', message: 'x', requestId: 'request-401' }, 401))
+    render(<App />)
+    await signInThroughPortal('alice', 'wrong')
+    expect((await screen.findByRole('alert')).textContent).toMatch(/Sign-in failed/)
+    expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull()
+  })
+
+  it('explains that a signed-in account without the operator role cannot create', async () => {
+    identityPortal(async () => json({ username: 'cleanup-bot', roles: ['CLEANUP'] }))
+    window.history.replaceState(null, '', '/#create')
+    render(<App />)
+    await signInThroughPortal('cleanup-bot', 'test-only-cleanup-bot-pass')
+    expect(await screen.findByText(/cleanup-bot, which cannot create environments/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Create environment' })).toHaveProperty('disabled', true)
+  })
+
+  it('keeps the same idempotency key after a 401 so the request can be retried after signing in again', async () => {
+    stubCreationKey('create-key-1', 'create-key-2')
+    setSession(operatorSession)
+    let posts = 0
+    const fetchMock = identityPortal(async () => json({ username: 'alice', roles: ['OPERATOR'] }), async () => {
+      posts += 1
+      return posts === 1
+        ? json({ code: 'UNAUTHENTICATED', message: 'x', requestId: 'request-401' }, 401)
+        : json({ environmentId: demoEnvironment.id, operationId: demoOperation.id,
+          environmentStatus: 'REQUESTED', operationStatus: 'PENDING' }, 202)
+    })
+    window.history.replaceState(null, '', '/#create')
+    render(<App />)
+    await userEvent.type(screen.getByLabelText('Environment name'), 'After sign-in')
+    await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+    expect(await screen.findByText(/Sign in again/)).toBeTruthy()
+    expect(screen.getByText(/request-401/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Retry the same request' })).toHaveProperty('disabled', true)
+    await signInThroughPortal()
+    await screen.findByText(/Signed in as/)
+    await userEvent.click(screen.getByRole('button', { name: 'Retry the same request' }))
+    await screen.findByRole('heading', { name: 'Operation history' })
+    const requests = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')
+    expect(requests).toHaveLength(2)
+    expect(requests.map(([, init]) => (init?.headers as Record<string, string> | undefined)?.['Idempotency-Key']))
+      .toEqual(['create-key-1', 'create-key-1'])
+    expect(requests[1]?.[1]?.body).toBe(requests[0]?.[1]?.body)
   })
 })

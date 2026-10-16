@@ -2,6 +2,7 @@ package io.github.dcfaight.platformlab.worker;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.github.dcfaight.platformlab.security.TestUsers;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -39,6 +40,7 @@ class KindWorkerFlowTests {
         registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
+        TestUsers.register(registry);
     }
 
     @LocalServerPort int port;
@@ -51,6 +53,7 @@ class KindWorkerFlowTests {
                 .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/json")
                 .header("Idempotency-Key", "kind-worker-full-flow")
+                .header("Authorization", TestUsers.basic(TestUsers.OPERATOR))
                 .POST(HttpRequest.BodyPublishers.ofString("""
                         {"name":"Kind worker flow","templateId":"sample-service","ttlHours":1}
                         """)).build(), HttpResponse.BodyHandlers.ofString());
@@ -85,7 +88,8 @@ class KindWorkerFlowTests {
         assertEquals("READY", environment.path("status").asText());
         assertEquals("env-" + environmentId.replace("-", ""), environment.path("namespace").asText());
         var deletion = client.send(HttpRequest.newBuilder(url("/api/v1/environments/" + environmentId))
-                .timeout(Duration.ofSeconds(10)).DELETE().build(), HttpResponse.BodyHandlers.ofString());
+                .timeout(Duration.ofSeconds(10)).header("Authorization", TestUsers.basic(TestUsers.OPERATOR))
+                .DELETE().build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(202, deletion.statusCode(), deletion.body());
         JsonNode deleteAcceptance = mapper.readTree(deletion.body());
         assertEquals("DELETING", deleteAcceptance.path("environmentStatus").asText());

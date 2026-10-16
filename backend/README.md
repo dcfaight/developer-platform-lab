@@ -52,9 +52,59 @@ these same `DB_*` variables in the run configuration.
 | `DB_USERNAME` | `platform_lab` |
 | `DB_PASSWORD` | Required; no default |
 
-No Kubernetes cluster is required for API-only use. There is no authentication or added CORS
-configuration; keep this API in a trusted local environment. Audit events use
-a fixed local-development actor, never caller actor headers.
+No Kubernetes cluster is required for API-only use. No CORS configuration is
+added; keep this API in a trusted local environment (loopback only).
+
+## Authentication and authorization
+
+Mutations require HTTP Basic credentials for an account configured at startup.
+Reads stay anonymous. This is a first, deliberately narrow boundary, not SSO or
+enterprise RBAC. See [docs/api.md](../docs/api.md#authentication-and-authorization)
+for the exact rules and error responses.
+
+| Role | Allowed mutations |
+|---|---|
+| `OPERATOR` | `POST /api/v1/environments`; any `DELETE /api/v1/environments/{id}` (with or without `expiredBefore`) |
+| `CLEANUP` | Only expiry-guarded `DELETE /api/v1/environments/{id}?expiredBefore=…` (used by the cleanup CLI) |
+
+Accounts are configured with Spring Boot relaxed binding; only password
+**hashes** are accepted, prefixed `{bcrypt}` or `{pbkdf2@SpringSecurity_v5_8}`.
+Usernames match `[A-Za-z0-9][A-Za-z0-9._@-]{0,63}`; `local-development` is
+reserved and duplicate (case-insensitive) names are rejected at startup.
+With no accounts configured the backend still starts, logs a warning, and rejects
+every mutation. Generate a PBKDF2 hash without putting the password in shell
+history (`$` in bcrypt hashes needs careful shell quoting, so PBKDF2 is simpler):
+
+```sh
+python3 -c 'import hashlib,secrets,getpass; pw=getpass.getpass(); s=secrets.token_bytes(16); print("{pbkdf2@SpringSecurity_v5_8}"+(s+hashlib.pbkdf2_hmac("sha256",pw.encode(),s,310000,32)).hex())'
+```
+
+Then, in the shell that starts the backend (or in the IntelliJ run configuration):
+
+```sh
+export PLATFORM_SECURITY_USERS_0_USERNAME=alice
+export PLATFORM_SECURITY_USERS_0_PASSWORDHASH='<paste the printed hash>'
+export PLATFORM_SECURITY_USERS_0_ROLES=OPERATOR
+# Optional account for automation/cleanup_expired.py --execute:
+export PLATFORM_SECURITY_USERS_1_USERNAME=cleanup-bot
+export PLATFORM_SECURITY_USERS_1_PASSWORDHASH='<another hash>'
+export PLATFORM_SECURITY_USERS_1_ROLES=CLEANUP
+```
+
+`GET /api/v1/me` verifies credentials and returns `{"username", "roles"}`; the
+portal uses it to sign in. Audit events record the authenticated username as
+`actor` (never a caller-supplied header). Rows written before this change keep
+`local-development`; the V5 migration widens the actor constraint to the username
+format. Request completion logs still do not record the actor.
+
+Remaining gaps, stated plainly: credentials travel in every mutation request as
+plain HTTP Basic, which is only acceptable on loopback (any other deployment needs
+TLS); there is no SSO/OIDC, session expiry, rate limiting, or account lockout;
+accounts are static configuration with no runtime management; reads, including
+audit-relevant history, are anonymous; any `OPERATOR` may delete any environment
+(no ownership- or team-based authorization); and idempotency keys are global, so
+replaying another operator's key returns the original acceptance without a new
+audit event.
 
 ## Enable local provisioning
 
@@ -190,30 +240,34 @@ deadline, including crashes before the accepted DELETE could be persisted.
 
 This slice observes initial Deployment readiness, not ongoing health after
 success. It does not provide custom manifests/images, Services, ingress,
-scheduled cleanup, production RBAC, or authentication. The portal supports
+scheduled cleanup, or production RBAC/SSO. The portal supports
 creation and confirmed deletion through the backend API; it has no direct
 Kubernetes access.
 Expired TTL metadata does not remove resources.
 
 ## Manual API checks
 
-Run these in another terminal. The first request returns `202`, both IDs,
+Run these in another terminal with an `OPERATOR` account configured as above.
+`-u "$OPERATOR_USERNAME"` makes curl prompt for the password, keeping it out of
+shell history and process arguments. Without credentials, POST returns `401`
+`UNAUTHENTICATED`; reads need none. The first request returns `202`, both IDs,
 `REQUESTED` / `PENDING`, a `Location` operation URL, and `X-Request-Id`:
 
 ```sh
-curl -i -X POST http://127.0.0.1:8080/api/v1/environments \
+OPERATOR_USERNAME=alice
+curl -i -u "$OPERATOR_USERNAME" -X POST http://127.0.0.1:8080/api/v1/environments \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: local-demo-1' \
   -d '{"name":" demo ","templateId":"sample-service"}'
 
 # Equivalent normalized request: same IDs, states, and Location; no new writes.
-curl -i -X POST http://127.0.0.1:8080/api/v1/environments \
+curl -i -u "$OPERATOR_USERNAME" -X POST http://127.0.0.1:8080/api/v1/environments \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: local-demo-1' \
   -d '{"name":"demo","templateId":"sample-service","ttlHours":8}'
 
 # Different normalized input with the same key: 409 IDEMPOTENCY_CONFLICT.
-curl -i -X POST http://127.0.0.1:8080/api/v1/environments \
+curl -i -u "$OPERATOR_USERNAME" -X POST http://127.0.0.1:8080/api/v1/environments \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: local-demo-1' \
   -d '{"name":"different","templateId":"sample-service","ttlHours":8}'

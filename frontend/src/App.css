@@ -58,6 +58,8 @@ small { display: block; margin-top: 6px; overflow-wrap: anywhere; }
 .notice strong { display: block; }
 .back-link { display: inline-block; margin-bottom: 20px; }
 .create-panel { max-width: 760px; }
+.account-panel form { display: flex; flex-wrap: wrap; gap: 14px; align-items: end; }
+.account-panel .form-field input { max-width: 240px; }
 .create-panel > p { max-width: 660px; }
 .create-panel form { display: grid; gap: 22px; margin-top: 24px; }
 .form-field { display: grid; gap: 8px; }

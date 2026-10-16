@@ -1,15 +1,18 @@
 """Bounded, trusted-loopback expiration cleanup through the backend API only."""
 
 import argparse
+import base64
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import http.client
 import ipaddress
 import json
 import math
+import os
 import re
 import socket
 import ssl
+import sys
 import threading
 import time
 from urllib.parse import urlencode, urlsplit
@@ -20,6 +23,8 @@ STATES = {"REQUESTED", "PROVISIONING", "READY", "FAILED", "DELETING",
           "DELETED", "DELETE_FAILED"}
 ELIGIBLE = {"READY", "FAILED"}
 MAX_BODY = 1024 * 1024
+USERNAME_ENV = "PLATFORM_CLEANUP_USERNAME"
+PASSWORD_ENV = "PLATFORM_CLEANUP_PASSWORD"
 
 
 class Failure(Exception):
@@ -130,6 +135,19 @@ def base_url(value):
             "API URL must be http(s)://loopback:port/api/v1, without credentials, query or fragment") from None
 
 
+def basic_authorization(environ):
+    """Build the DELETE credential from the environment; values are never logged or printed."""
+    username = environ.get(USERNAME_ENV)
+    password = environ.get(PASSWORD_ENV)
+    if (not isinstance(username, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}", username)
+            or not isinstance(password, str) or not password or len(password) > 1024):
+        raise ValueError(f"--execute requires {USERNAME_ENV} (a configured CLEANUP or OPERATOR "
+                         f"username) and a nonempty {PASSWORD_ENV} in the environment")
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return "Basic " + token
+
+
 def bounded_int(low, high):
     def parse(value):
         try:
@@ -171,8 +189,9 @@ def arguments(argv=None):
 
 
 class Client:
-    def __init__(self, args):
+    def __init__(self, args, authorization=None):
         self.args = args
+        self.authorization = authorization
 
     def once(self, method, path):
         scheme, host, port = self.args.api_base_url
@@ -196,7 +215,11 @@ class Client:
             timer.daemon = True
             timer.start()
             sock.settimeout(self.args.request_timeout)
-            connection.request(method, "/api/v1" + path, headers={"Accept": "application/json"})
+            headers = {"Accept": "application/json"}
+            # Reads are trusted-local; only the mutation carries credentials.
+            if method == "DELETE" and self.authorization:
+                headers["Authorization"] = self.authorization
+            connection.request(method, "/api/v1" + path, headers=headers)
             response = connection.getresponse()
             body = response.read(MAX_BODY + 1)
             if expired.is_set():
@@ -383,9 +406,16 @@ def run(args, clock=lambda: datetime.now(timezone.utc), client=None):
     return result
 
 
-def main(argv=None):
+def main(argv=None, environ=None):
     args = arguments(argv)
-    result = run(args)
+    authorization = None
+    if args.execute:
+        try:
+            authorization = basic_authorization(os.environ if environ is None else environ)
+        except ValueError as error:
+            print(f"cleanup_expired.py: error: {error}", file=sys.stderr)
+            return 2
+    result = run(args, client=Client(args, authorization))
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:

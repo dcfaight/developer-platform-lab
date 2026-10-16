@@ -14,17 +14,17 @@ public class AuditRepository {
         this.jdbc = jdbc;
     }
 
-    public void recordCreation(UUID environmentId, UUID operationId, Instant now) {
+    public void recordCreation(UUID environmentId, UUID operationId, String actor, Instant now) {
         jdbc.update("""
                 INSERT INTO audit_events (id, environment_id, operation_id, action, actor, created_at)
-                VALUES (?, ?, ?, 'ENVIRONMENT_REQUESTED', 'local-development', ?)
-                """, UUID.randomUUID(), environmentId, operationId, now.atOffset(ZoneOffset.UTC));
+                VALUES (?, ?, ?, 'ENVIRONMENT_REQUESTED', ?, ?)
+                """, UUID.randomUUID(), environmentId, operationId, actor, now.atOffset(ZoneOffset.UTC));
     }
 
-    public void recordDeletion(UUID environmentId, UUID operationId, Instant now) {
+    public void recordDeletion(UUID environmentId, UUID operationId, String actor, Instant now) {
         jdbc.update("""
                 INSERT INTO audit_events (id, environment_id, operation_id, action, actor, created_at)
-                VALUES (?, ?, ?, 'ENVIRONMENT_DELETE_REQUESTED', 'local-development', ?)
-                """, UUID.randomUUID(), environmentId, operationId, now.atOffset(ZoneOffset.UTC));
+                VALUES (?, ?, ?, 'ENVIRONMENT_DELETE_REQUESTED', ?, ?)
+                """, UUID.randomUUID(), environmentId, operationId, actor, now.atOffset(ZoneOffset.UTC));
     }
 }

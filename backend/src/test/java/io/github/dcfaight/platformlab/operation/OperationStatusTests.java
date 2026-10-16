@@ -2,6 +2,7 @@ package io.github.dcfaight.platformlab.operation;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.github.dcfaight.platformlab.security.TestUsers;
 import io.github.dcfaight.platformlab.worker.WorkerProperties;
 import io.github.dcfaight.platformlab.worker.WorkerRepository;
 import java.net.URI;
@@ -33,6 +34,7 @@ class OperationStatusTests {
         registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
+        TestUsers.register(registry);
     }
 
     @LocalServerPort int port;
@@ -46,6 +48,7 @@ class OperationStatusTests {
         var accepted = client.send(HttpRequest.newBuilder(url("/api/v1/environments"))
                 .header("Content-Type", "application/json")
                 .header("Idempotency-Key", "rich-status")
+                .header("Authorization", TestUsers.basic(TestUsers.OPERATOR))
                 .POST(HttpRequest.BodyPublishers.ofString("""
                         {"name":"Rich status","templateId":"sample-service","ttlHours":1}
                         """)).build(), HttpResponse.BodyHandlers.ofString());
@@ -125,6 +128,7 @@ class OperationStatusTests {
 
         var other = client.send(HttpRequest.newBuilder(url("/api/v1/environments"))
                 .header("Content-Type", "application/json").header("Idempotency-Key", "other-history")
+                .header("Authorization", TestUsers.basic(TestUsers.OPERATOR))
                 .POST(HttpRequest.BodyPublishers.ofString("""
                         {"name":"Other environment","templateId":"sample-service","ttlHours":1}
                         """)).build(), HttpResponse.BodyHandlers.ofString());

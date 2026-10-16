@@ -2,7 +2,7 @@
 
 A hands-on internal developer platform for provisioning development environments, deploying a sample application, and understanding operational status through a self-service portal.
 
-> **Project status:** Persistent requests support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal supports create → observe → delete, with confirmation and ownership-checked asynchronous namespace removal. Manual API-driven expiration cleanup is available, dry-run by default. Authentication/authorization, continuous health monitoring, and production deployment hardening remain unimplemented. This is a production-minded lifecycle slice, not overall production readiness.
+> **Project status:** Persistent requests support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal supports create → observe → delete, with confirmation and ownership-checked asynchronous namespace removal. Manual API-driven expiration cleanup is available, dry-run by default. Mutations now require HTTP Basic sign-in for locally configured `OPERATOR`/`CLEANUP` accounts, and audit events record the authenticated user; reads stay anonymous. SSO, ownership/team authorization, continuous health monitoring, and production deployment hardening remain unimplemented. This is a production-minded lifecycle slice, not overall production readiness.
 >
 > Except where marked as available now, this README preserves the intended architecture and delivery blueprint, not a claim that the full platform is implemented.
 >
@@ -14,7 +14,8 @@ A hands-on internal developer platform for provisioning development environments
 |---|---|
 | Portal creation and guarded asynchronous deletion; durable requests and ownership checks | Production deployment hardening |
 | Opt-in leased worker provisioning an approved sample in local kind; manual expiration CLI | Scheduled expiration and continuous post-provisioning health monitoring |
-| Portal with page-local status counts, creation, details, and durable operation timelines | Authentication, production RBAC, and multi-user hardening |
+| Portal with page-local status counts, creation, details, and durable operation timelines | SSO/OIDC, ownership/team RBAC, and multi-user hardening |
+| HTTP Basic sign-in for configured accounts gating create/delete/cleanup; authenticated audit actor | TLS, read authorization, rate limiting, and account management |
 | Loading/error/retry states, sanitized failures, and request correlation | Custom templates/images, Services, and ingress |
 
 **Start here:** [local demo and troubleshooting runbook](docs/demo.md) for the
@@ -87,7 +88,8 @@ The portal submits creation requests through the existing API; it does not acces
 Creation in progress cannot be deleted. Deletion retains environment and operation
 records for inspection. A failed deletion can be requested again after correcting
 the cause; ownership failures must never be bypassed. These resource-ownership
-checks are not user authorization: the lab still assumes trusted local callers.
+checks are not user authorization. Deletion requires an authenticated `OPERATOR`
+(any operator may delete any environment; there is no per-owner policy).
 
 ### Expire an environment (available now, manually invoked)
 
@@ -331,7 +333,10 @@ Key fields:
 - `timestamp`
 - `details`
 
-The MVP uses an explicitly labeled local-development actor. This is not a substitute for authenticated identity.
+`actor` is the authenticated username of the account that requested creation or
+deletion (the cleanup account for CLI deletions). Rows written before
+authentication existed keep the legacy `local-development` actor, which is now a
+reserved, unconfigurable username.
 
 ## 9. Proposed REST API
 
@@ -456,10 +461,12 @@ The Python expiration tool:
 6. Emits a structured summary and nonzero exit for errors/incomplete scans.
 
 Execution is manual and trusted-loopback only; no scheduler/CronJob is added.
+`--execute` authenticates with a `CLEANUP` account from environment variables;
+that role can only send expiry-guarded deletes.
 `202` is acceptance, not namespace removal. Database/audit history is retained.
 See [commands, bounds, recovery and exit codes](automation/README.md) and the
 [create → expire walkthrough](docs/demo.md#5-manual-expiration-cleanup).
-Auth/authz and deployment hardening remain prerequisites for broader use.
+SSO, ownership/team authorization, TLS, and deployment hardening remain prerequisites for broader use.
 
 ## 14. Local Setup Plan
 
@@ -474,7 +481,11 @@ Follow the executable [local demo guide](docs/demo.md):
 The worker uses a fixed sample image; no custom application build/load is required.
 For API-only use, skip kind and leave the worker disabled; requests remain pending.
 
-Until authentication and additional hardening exist, run this project only in a trusted local environment. Do not expose it publicly.
+Mutations require HTTP Basic credentials for accounts you configure at backend
+startup ([how](backend/README.md#authentication-and-authorization)); reads are
+anonymous. Plain HTTP Basic, anonymous reads, and missing deployment hardening
+mean this project must still run only in a trusted local environment. Do not
+expose it publicly.
 
 ### Persistent backend quick start (available now)
 
@@ -526,7 +537,8 @@ progress steps/events, attempt count, lifecycle timestamps, request correlation,
 and sanitized failure summaries. Views refresh every 10 seconds or on demand;
 failed refreshes explicitly retain the last loaded data. Times use the browser's
 local timezone. Eligible environments expose a guarded delete action in detail;
-acceptance is not completed removal. There is no authentication or user authorization.
+acceptance is not completed removal. Create and delete require signing in with an
+`OPERATOR` account in the portal; credentials stay in page memory only.
 
 With the worker disabled, the portal honestly shows `REQUESTED` / `PENDING`;
 enable the optional local-kind worker to observe provisioning and readiness.
@@ -541,8 +553,9 @@ startup. `DB_URL` defaults to
 and `DB_PASSWORD` is required with no default.
 See [backend/README.md](backend/README.md#manual-api-checks) for copyable curl
 checks covering creation, normalized replay, conflicts, list/detail reads,
-errors, and restart persistence. No authentication or CORS is added; the audit
-actor is fixed to local development, never supplied by caller headers.
+errors, and restart persistence. Mutations require an `OPERATOR` account
+(curl prompts with `-u <username>`); no CORS is added. The audit actor is the
+authenticated username, never supplied by caller headers.
 See [infra/README.md](infra/README.md) for the optional kind cluster and
 [backend/README.md](backend/README.md) to enable the provisioning worker.
 The approved sample uses a fixed public image, not a user-supplied manifest.
@@ -667,7 +680,8 @@ Any reported performance results will include the test environment and method.
 
 ### Later candidates
 
-- Authentication and team-based authorization.
+- SSO/OIDC, TLS, and ownership- or team-based authorization (basic
+  authenticated mutations exist now).
 - Service catalog and ownership.
 - Multiple approved templates.
 - Deployment versions and history.
