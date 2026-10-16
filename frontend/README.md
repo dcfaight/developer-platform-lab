@@ -18,18 +18,21 @@ http://127.0.0.1:8080. No CORS changes or frontend credentials are needed.
 
 - Paginated environment inventory (10 per page): name, status, template,
   namespace, created/expires times, and latest/active operation.
+  Ready/in-progress/failed counts summarize only the loaded page, not the
+  entire inventory or live workload health.
 - Select an environment to see richer metadata and paginated operation history
   (5 per page), newest first. Hash links such as `#environment/{id}` support
   reloads and browser back/forward navigation without a router dependency.
 - Operation state, recorded progress step, attempt count, lifecycle/lease/retry
   timestamps, sanitized failure summaries, request correlation IDs, and durable
-  progress events in backend order. Progress is not an invented percentage.
+  progress events in oldest-first backend order with event counts. Progress is
+  not an invented percentage.
 - Loading, empty, unavailable/not-found, and retry states. Views refresh every
   10 seconds after a request finishes; Refresh retries immediately. A failed
   refresh retains and labels the last loaded data. Navigation cancels obsolete
   requests. All displayed times use the browser's local timezone.
 
-Create an environment through the backend's
+Use the [local demo and troubleshooting guide](../docs/demo.md) or the backend's
 [manual API checks](../backend/README.md#manual-api-checks) to populate the portal.
 With the worker disabled the operation stays pending; enable the optional
 local-kind worker to demonstrate actual progress. The portal sends only GETs.

@@ -8,6 +8,20 @@ A hands-on internal developer platform for provisioning development environments
 >
 > **Disclaimer:** This is an independent portfolio project inspired by platform engineering challenges. It is not an eBay product and does not reproduce eBay’s proprietary systems.
 
+## What works today / what is next
+
+| Implemented now | Future work, not demo claims |
+|---|---|
+| Validated, idempotent environment requests persisted in PostgreSQL | Portal create/delete controls and a deletion workflow |
+| Opt-in leased worker provisioning an approved sample in local kind | Expiration cleanup and continuous post-provisioning health monitoring |
+| Read-only portal with page-local status counts, details, and durable operation timelines | Authentication, production RBAC, and multi-user hardening |
+| Loading/error/retry states, sanitized failures, and request correlation | Custom templates/images, Services, and ingress |
+
+**Start here:** [local demo and troubleshooting runbook](docs/demo.md) for the
+repeatable request → provision → observe walkthrough, safe replay, and manual
+lab reset. See [backend setup](backend/README.md#run-locally) and
+[frontend setup](frontend/README.md) for service-specific commands.
+
 ## 1. Project Purpose
 
 Developer Platform Lab explores how a platform engineering team can reduce friction in the software development lifecycle.
@@ -49,7 +63,9 @@ These boundaries keep the first version achievable and its security assumptions 
 
 ## 3. Primary User Journey
 
-### Create an environment
+### Create an environment (target journey)
+
+Today, creation is through the API; the portal provides read-only status views.
 
 1. The developer opens the portal.
 2. They enter an environment name and choose an allowed lifetime.
@@ -60,7 +76,7 @@ These boundaries keep the first version achievable and its security assumptions 
 7. The portal displays progress while the worker checks readiness.
 8. The environment becomes ready, or the operation reports a useful failure.
 
-### Delete an environment
+### Delete an environment (planned)
 
 1. The developer requests deletion.
 2. The backend records a deletion operation.
@@ -68,7 +84,7 @@ These boundaries keep the first version achievable and its security assumptions 
 4. The worker requests namespace deletion.
 5. The platform confirms removal before reporting completion.
 
-### Expire an environment
+### Expire an environment (planned)
 
 The Python cleanup tool identifies expired environments through the backend API and requests deletion using the same workflow as the portal.
 
@@ -437,20 +453,16 @@ A Kubernetes CronJob can be added later without changing deletion semantics.
 
 ## 14. Local Setup Plan
 
-The intended workflow is:
+Follow the executable [local demo guide](docs/demo.md):
 
-1. Install the pinned development prerequisites.
-2. Clone the repository.
-3. Copy `.env.example` to a local environment file.
-4. Start PostgreSQL.
-5. Create the dedicated kind cluster.
-6. Build and load the sample application image.
-7. Configure backend access to that cluster.
-8. Run the backend from IntelliJ IDEA or Maven.
-9. Run the frontend from VS Code.
-10. Provision the first environment.
+1. Install Java 17, Node.js 24/npm 11, Docker with Compose, kind, kubectl, curl, and jq.
+2. Configure the ignored `.env`, start PostgreSQL, and export the backend `DB_*` variables.
+3. Create the dedicated kind cluster and enable the worker in the host-run backend.
+4. Start the Vite frontend and submit a request through the API.
+5. Replay safely and observe the operation in the API and portal.
 
-Executable commands will be added and verified during implementation.
+The worker uses a fixed sample image; no custom application build/load is required.
+For API-only use, skip kind and leave the worker disabled; requests remain pending.
 
 Until authentication and additional hardening exist, run this project only in a trusted local environment. Do not expose it publicly.
 

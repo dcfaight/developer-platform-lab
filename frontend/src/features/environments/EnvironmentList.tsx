@@ -18,9 +18,20 @@ export function EnvironmentList({ page, onPageChange }: {
     </div>
     <ResourceState {...resource} hasData={!!data} />
     {data && <>
+      {data.items.length > 0 && <section className="inventory-summary" aria-label="Status summary for this page">
+        <p className="muted">This page only · {data.items.length} environments · Last recorded readiness, not live health</p>
+        <dl className="summary-grid">
+          <div><dt>Ready</dt><dd>{data.items.filter((item) => item.status === 'READY').length}</dd></div>
+          <div><dt>In progress</dt><dd>{data.items.filter((item) => ['REQUESTED', 'PROVISIONING'].includes(item.status)).length}</dd></div>
+          <div><dt>Failed</dt><dd>{data.items.filter((item) => item.status === 'FAILED').length}</dd></div>
+        </dl>
+      </section>}
       {data.items.length === 0
         ? <div className="empty"><h3>{data.totalElements ? 'No environments on this page' : 'No environments yet'}</h3>
-          <p>Environment requests are made through the backend API. This portal is read-only.</p></div>
+          {data.totalElements
+            ? <p>Use Previous to return to earlier results.</p>
+            : <><p>Start with <code>POST /api/v1/environments</code> using the local demo guide in <code>docs/demo.md</code>.</p>
+              <p>This portal is read-only. Enable the backend worker and local kind cluster to see provisioning progress.</p></>}</div>
         : <div className="table-scroll"><table>
           <caption className="sr-only">Environments and their latest operation status</caption>
           <thead><tr><th scope="col">Environment</th><th scope="col">Status</th><th scope="col">Template / namespace</th>

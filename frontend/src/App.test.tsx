@@ -29,7 +29,24 @@ describe('read-only portal', () => {
     expect(screen.getByRole('status').textContent).toBe('Loading…')
     await act(async () => resolve(json(paged([]))))
     expect(screen.getByRole('heading', { name: 'No environments yet' })).toBeTruthy()
+    expect(screen.getByText('POST /api/v1/environments')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'Status summary for this page' })).toBeNull()
     expect(screen.queryByRole('button', { name: /create|delete/i })).toBeNull()
+  })
+
+  it('summarizes only the loaded page, not the inventory total', async () => {
+    const items = ['READY', 'REQUESTED', 'PROVISIONING', 'FAILED'].map((status, index) => ({
+      ...demoEnvironment, id: `environment-${index}`, name: `Environment ${index}`, status,
+    }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(paged(items, { totalElements: 24, totalPages: 3 }))))
+    render(<App />)
+    const summary = await screen.findByRole('region', { name: 'Status summary for this page' })
+    expect(summary.textContent).toContain('This page only · 4 environments')
+    for (const [label, count] of [['Ready', '1'], ['In progress', '2'], ['Failed', '1']]) {
+      expect(within(summary).getByText(label).nextElementSibling?.textContent).toBe(count)
+    }
+    expect(screen.getByText('24 total')).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Skip to content' }).getAttribute('href')).toBe('#main-content')
   })
 
   it('lists environment metadata and navigates to durable progress history', async () => {
@@ -44,6 +61,7 @@ describe('read-only portal', () => {
     await userEvent.click(link)
     expect(await screen.findByRole('heading', { name: 'Operation history' })).toBeTruthy()
     expect(await screen.findByText(demoOperation.events[0].message)).toBeTruthy()
+    expect(screen.getByText('1 recorded event · Oldest first')).toBeTruthy()
     expect(screen.getByText(demoOperation.correlationId!)).toBeTruthy()
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/operations?page=0&size=5'))).toBe(true)
     await userEvent.click(screen.getByRole('link', { name: /All environments/ }))
@@ -113,6 +131,14 @@ describe('read-only portal', () => {
     await within(history).findByRole('article')
     await userEvent.click(within(history).getByRole('button', { name: 'Next' }))
     expect(await within(history).findByText('No operations on this page.')).toBeTruthy()
+  })
+
+  it('distinguishes an environment with no recorded operations from an empty page', async () => {
+    window.history.replaceState(null, '', `/#environment/${demoEnvironment.id}`)
+    vi.stubGlobal('fetch', vi.fn(async (url: string) =>
+      json(url.includes('/operations?') ? paged([]) : demoEnvironment)))
+    render(<App />)
+    expect(await screen.findByText('No operations recorded for this environment yet.')).toBeTruthy()
   })
 
   it('refreshes periodically, keeps stale data on error, and aborts on unmount', async () => {

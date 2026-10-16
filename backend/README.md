@@ -99,7 +99,8 @@ Kubernetes reconciliation and database fencing protect repeated work.
 
 This slice observes initial Deployment readiness, not ongoing health after
 success. It does not provide custom manifests/images, Services, ingress,
-deletion, automatic cleanup, production RBAC, authentication, or portal wiring.
+deletion, automatic cleanup, production RBAC, or authentication. The read-only
+portal displays these API records; it does not create requests or control Kubernetes.
 Expired TTL metadata does not remove resources.
 
 ## Manual API checks
