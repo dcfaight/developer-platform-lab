@@ -24,6 +24,7 @@ spec:
       labels:
         app: backend
     spec:
+      serviceAccountName: platform-worker
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -47,7 +48,9 @@ spec:
             - name: SPRING_PROFILES_ACTIVE
               value: deploy
             - name: PLATFORM_WORKER_ENABLED
-              value: "false"
+              value: "true"
+            - name: PLATFORM_KUBERNETES_MODE
+              value: in-cluster
             - name: DB_URL
               valueFrom:
                 configMapKeyRef:
@@ -103,7 +106,22 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: worker-credentials
+              mountPath: /var/run/secrets/platform-worker
+              readOnly: true
       volumes:
+        - name: worker-credentials
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
         - name: tmp
           emptyDir:
             medium: Memory

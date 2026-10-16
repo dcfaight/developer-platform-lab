@@ -32,8 +32,9 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
 
     @Autowired
     public KubernetesEnvironmentProvisioner(
+            @Value("${platform.kubernetes.mode:local-kind}") String mode,
             @Value("${platform.kubernetes.kubeconfig:${user.home}/.kube/config}") String kubeconfig) {
-        this(LocalKubernetesClient.open(kubeconfig));
+        this(WorkerKubernetesClient.open(mode, kubeconfig));
     }
 
     KubernetesEnvironmentProvisioner(KubernetesClient client) {

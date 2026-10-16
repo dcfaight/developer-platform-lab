@@ -135,6 +135,7 @@ in the shell with the same `DB_*` exports:
 
 ```sh
 export WORKER_ENABLED=true
+export PLATFORM_KUBERNETES_MODE=local-kind
 export PLATFORM_KUBERNETES_KUBECONFIG="$HOME/.kube/config"
 cd backend
 ./mvnw spring-boot:run
@@ -152,6 +153,15 @@ current context as permission to reach arbitrary clusters. Keep the kubeconfig
 trusted and local; never commit it. Only persisted `env-<UUID without hyphens>`
 namespaces and the fixed `sample-service` Deployment/image are allowed.
 Unowned resources are not adopted or overwritten.
+
+The default `platform.kubernetes.mode=local-kind` preserves those restrictions.
+The separate [K3s package](../infra/README.md#local-k3s-platform) explicitly sets
+`PLATFORM_KUBERNETES_MODE=in-cluster` and `PLATFORM_WORKER_ENABLED=true`, retaining
+the `deploy` profile's network/probe settings. That mode uses the fixed cluster
+API HTTPS endpoint and dedicated projected service-account CA/token files, not
+kubeconfig or the current context. Unknown modes and missing credentials fail
+closed. Do not enable it in Compose or mount an administrator kubeconfig.
+The worker begins processing existing pending work when enabled.
 
 Default worker settings under `platform.worker`:
 

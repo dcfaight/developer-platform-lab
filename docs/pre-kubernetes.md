@@ -7,9 +7,11 @@ themselves to Kubernetes. It is a baseline and roadmap, not a deployment guide o
 a claim of production readiness.
 
 First-pass implementation is now available in `infra/kubernetes/`; see the
-[K3s API-only runbook](../infra/README.md#local-k3s-platform-api-only).
-It packages the UI, API, persistent PostgreSQL, and local TLS ingress, but does
-not enable the worker or establish completed K3s lifecycle/recovery validation.
+[K3s runbook](../infra/README.md#local-k3s-platform).
+It packages the UI, API, persistent PostgreSQL, local TLS ingress, and an explicit
+in-cluster worker with projected credentials and dedicated RBAC. A separate
+opt-in authenticated lifecycle test is available; completed K3s lifecycle/recovery
+validation still requires recorded results on the target cluster.
 The assessment and unchecked roadmap below describe the original baseline.
 
 ## Current platform and workflows
@@ -48,7 +50,8 @@ deployment target. Its successful NGINX/port-forward smoke test (demo since
 removed) establishes basic cluster access, not platform deployment or lifecycle
 validation. It does not replace the repository's existing kind development/test
 workflow. Switching the current kubectl context does not retarget the worker:
-K3s and in-cluster access require an explicit client/authentication design.
+K3s now uses the separately selected `in-cluster` client mode, not a changed
+kubectl context. The gaps/checklist below remain the historical baseline.
 
 ## Missing Kubernetes deployment pieces
 
