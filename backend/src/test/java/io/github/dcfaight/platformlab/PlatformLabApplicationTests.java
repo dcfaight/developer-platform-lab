@@ -73,6 +73,26 @@ class PlatformLabApplicationTests {
     }
 
     @Test
+    void environmentWithoutOperationsHasNullSummaryAndEmptyHistory() throws Exception {
+        UUID id = UUID.randomUUID();
+        jdbc.update("""
+                INSERT INTO environments (id, name, namespace, template_id, status,
+                    expires_at, created_at, updated_at)
+                VALUES (?, 'No operation', ?, 'sample-service', 'REQUESTED',
+                    now() + interval '1 hour', now(), now())
+                """, id, "env-" + id.toString().replace("-", ""));
+        var detail = get("/api/v1/environments/" + id);
+        assertEquals(200, detail.status());
+        assertTrue(detail.json().path("latestOperation").isNull());
+        var history = get("/api/v1/environments/" + id + "/operations");
+        assertEquals(200, history.status());
+        assertFields(history.json(), "items", "page", "size", "totalElements", "totalPages");
+        assertEquals(0, history.json().path("items").size());
+        assertEquals(0, history.json().path("totalElements").asInt());
+        assertEquals(0, history.json().path("totalPages").asInt());
+    }
+
+    @Test
     void creationPersistsCompleteEnvironmentOperationAndAudit() throws Exception {
         Instant before = Instant.now();
         ApiResponse created = request(port, "POST", "/api/v1/environments", """
@@ -91,7 +111,10 @@ class PlatformLabApplicationTests {
         ApiResponse environment = get("/api/v1/environments/" + environmentId);
         assertEquals(200, environment.status());
         assertFields(environment.json(), "id", "name", "namespace", "templateId", "status",
-                "expiresAt", "createdAt", "updatedAt");
+                "expiresAt", "createdAt", "updatedAt", "latestOperation");
+        assertFields(environment.json().path("latestOperation"), "id", "type", "status", "progressStep");
+        assertEquals(operationId, environment.json().path("latestOperation").path("id").asText());
+        assertEquals("PENDING", environment.json().path("latestOperation").path("status").asText());
         assertEquals(environmentId, environment.json().path("id").asText());
         assertEquals("Preview 123_-", environment.json().path("name").asText());
         assertEquals("env-" + environmentId.replace("-", ""), environment.json().path("namespace").asText());
@@ -320,7 +343,7 @@ class PlatformLabApplicationTests {
             assertEquals(page == 2 ? 1 : 2, response.json().path("items").size());
             for (JsonNode item : response.json().path("items")) {
                 assertFields(item, "id", "name", "namespace", "templateId", "status",
-                        "expiresAt", "createdAt", "updatedAt");
+                        "expiresAt", "createdAt", "updatedAt", "latestOperation");
                 actual.add(item.path("id").asText());
             }
         }

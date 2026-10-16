@@ -4,6 +4,7 @@ import io.github.dcfaight.platformlab.audit.AuditRepository;
 import io.github.dcfaight.platformlab.config.ApiException;
 import io.github.dcfaight.platformlab.environment.EnvironmentRepository.EnvironmentRecord;
 import io.github.dcfaight.platformlab.operation.OperationRepository;
+import io.github.dcfaight.platformlab.operation.OperationPage;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -57,26 +58,44 @@ public class EnvironmentService {
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public EnvironmentPage list(int page, int size) {
+        validatePage(page, size);
+        long total = environments.count();
+        return new EnvironmentPage(environments.page(page, size).stream().map(this::response).toList(),
+                page, size, total, (total + size - 1) / size);
+    }
+
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public EnvironmentResponse get(UUID id) {
+        return response(environments.find(id).orElseThrow(() ->
+                new ApiException(HttpStatus.NOT_FOUND, "NOT_FOUND", "Environment not found.")));
+    }
+
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public OperationPage history(UUID id, int page, int size) {
+        validatePage(page, size);
+        environments.find(id).orElseThrow(() ->
+                new ApiException(HttpStatus.NOT_FOUND, "NOT_FOUND", "Environment not found."));
+        long total = operations.count(id);
+        return new OperationPage(operations.page(id, page, size).stream().map(operations::response).toList(),
+                page, size, total, (total + size - 1) / size);
+    }
+
+    private static void validatePage(int page, int size) {
         if (page < 0 || page > 1_000_000 || size < 1 || size > 100) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST",
                     "page must be 0 to 1000000 and size must be 1 to 100.");
         }
-        long total = environments.count();
-        return new EnvironmentPage(environments.page(page, size).stream().map(EnvironmentService::response).toList(),
-                page, size, total, (total + size - 1) / size);
-    }
-
-    public EnvironmentResponse get(UUID id) {
-        return response(environments.find(id).orElseThrow(() ->
-                new ApiException(HttpStatus.NOT_FOUND, "NOT_FOUND", "Environment not found.")));
     }
 
     private static AcceptedEnvironmentResponse accepted(UUID environmentId, UUID operationId) {
         return new AcceptedEnvironmentResponse(environmentId, operationId, "REQUESTED", "PENDING");
     }
 
-    private static EnvironmentResponse response(EnvironmentRecord record) {
+    private EnvironmentResponse response(EnvironmentRecord record) {
+        var latest = operations.page(record.id(), 0, 1).stream().findFirst()
+                .map(operation -> new EnvironmentResponse.OperationSummary(operation.id(), operation.type(),
+                        operation.status(), operation.progressStep())).orElse(null);
         return new EnvironmentResponse(record.id(), record.name(), record.namespace(), record.templateId(),
-                record.status(), record.expiresAt(), record.createdAt(), record.updatedAt());
+                record.status(), record.expiresAt(), record.createdAt(), record.updatedAt(), latest);
     }
 }

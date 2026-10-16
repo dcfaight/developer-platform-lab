@@ -2,7 +2,7 @@
 
 A hands-on internal developer platform for provisioning development environments, deploying a sample application, and understanding operational status through a self-service portal.
 
-> **Project status:** Persistent requests now support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The frontend remains a static scaffold. Deletion, expiration cleanup, authentication, and production readiness are not implemented.
+> **Project status:** Persistent requests now support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. A read-only React portal lists environments and displays details, operation history, progress, and sanitized failures. Portal creation/deletion controls, expiration cleanup, authentication, and production readiness are not implemented.
 >
 > Except where marked as available now, this README preserves the intended architecture and delivery blueprint, not a claim that the full platform is implemented.
 >
@@ -224,7 +224,7 @@ This is a planned structure. Directories will be introduced as their functionali
 
 The directories above now have starter files or explicit placeholders.
 The backend base package is `io.github.dcfaight.platformlab`.
-The frontend renders a static page. The backend now requires PostgreSQL and
+The frontend provides a read-only environment inventory and operation status portal. The backend requires PostgreSQL and
 implements persistent environment creation requests and environment/operation
 reads, with Flyway migrations and durable idempotency. An opt-in worker provisions
 an approved sample workload only in the dedicated local kind cluster. Cleanup
@@ -313,7 +313,8 @@ The MVP uses an explicitly labeled local-development actor. This is not a substi
 
 All routes use the `/api/v1` prefix. This table preserves the target blueprint.
 Currently implemented: `POST /environments`, `GET /environments` (pagination
-only, no status filter), `GET /environments/{id}`, and `GET /operations/{id}`.
+only, no status filter), `GET /environments/{id}`,
+`GET /environments/{id}/operations` (paginated history), and `GET /operations/{id}`.
 Deletion and environment events routes are not implemented. Operation detail
 includes durable progress events. Acceptance still returns `REQUESTED` / `PENDING`;
 only the worker can verify readiness and mark the environment `READY`.
@@ -323,6 +324,7 @@ only the worker can verify readiness and mark the environment `READY`.
 | GET | `/environments` | List environments with bounded pagination and filters |
 | POST | `/environments` | Request environment creation |
 | GET | `/environments/{id}` | Read environment details |
+| GET | `/environments/{id}/operations` | Read paginated operation history |
 | DELETE | `/environments/{id}` | Request environment deletion |
 | GET | `/environments/{id}/events` | Read sanitized platform and runtime events |
 | GET | `/operations/{id}` | Read operation progress |
@@ -391,6 +393,9 @@ The initial demo accesses the sample application through a documented local port
 
 ## 12. Frontend Experience
 
+The list and read-only detail experience are available now. Creation and deletion
+controls below remain part of the intended blueprint, not the current portal.
+
 ### Environment list
 
 - Name and status.
@@ -398,7 +403,7 @@ The initial demo accesses the sample application through a documented local port
 - Refresh behavior.
 - Empty, loading, and error states.
 
-### Create environment form
+### Create environment form (planned)
 
 - Validated environment name.
 - Supported template.
@@ -411,7 +416,7 @@ The initial demo accesses the sample application through a documented local port
 - Latest observed readiness.
 - Operation history.
 - Sanitized diagnostic events.
-- Delete confirmation.
+- Delete confirmation (planned; no destructive actions are exposed now).
 
 The UI distinguishes “request accepted,” “resources created,” and “application ready.”
 
@@ -490,7 +495,21 @@ npm ci
 npm run dev
 ```
 
-The static portal is at http://localhost:5173; it is not connected to the API.
+The read-only portal is at http://localhost:5173. Vite proxies `/api` to the
+local backend, so no CORS configuration is needed. It lists environment status,
+template, namespace, created/expires timestamps, and latest/active operation.
+Select an environment to see its details, paginated operation history, recorded
+progress steps/events, attempt count, lifecycle timestamps, request correlation,
+and sanitized failure summaries. Views refresh every 10 seconds or on demand;
+failed refreshes explicitly retain the last loaded data. Times use the browser's
+local timezone. There are no portal create/delete actions or authentication.
+
+For a demo, create a request using the curl examples linked below, then refresh
+the portal. With the worker disabled, it honestly shows `REQUESTED` / `PENDING`;
+enable the optional local-kind worker to observe provisioning and readiness.
+Expiry timestamps do not trigger cleanup. This remains a work-in-progress
+portfolio blueprint, not production software. See [frontend/README.md](frontend/README.md)
+for navigation, testing, and deployment limitations.
 The backend listens on http://127.0.0.1:8080 and applies Flyway migrations on
 startup. `DB_URL` defaults to
 `jdbc:postgresql://127.0.0.1:5432/platform_lab`, `DB_USERNAME` to `platform_lab`,
@@ -508,6 +527,7 @@ Checks from the repository root (also run by CI):
 ```sh
 npm --prefix frontend ci
 npm --prefix frontend run lint
+npm --prefix frontend test
 npm --prefix frontend run build
 docker info
 (cd backend && ./mvnw verify)

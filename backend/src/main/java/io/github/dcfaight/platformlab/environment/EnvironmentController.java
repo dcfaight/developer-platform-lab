@@ -1,6 +1,7 @@
 package io.github.dcfaight.platformlab.environment;
 
 import io.github.dcfaight.platformlab.config.ApiIds;
+import io.github.dcfaight.platformlab.operation.OperationPage;
 import jakarta.validation.Valid;
 import java.net.URI;
 import org.springframework.http.ResponseEntity;
@@ -40,5 +41,11 @@ public class EnvironmentController {
     @GetMapping("/{id}")
     public EnvironmentResponse get(@PathVariable String id) {
         return service.get(ApiIds.parse(id));
+    }
+
+    @GetMapping("/{id}/operations")
+    public OperationPage history(@PathVariable String id, @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return service.history(ApiIds.parse(id), page, size);
     }
 }

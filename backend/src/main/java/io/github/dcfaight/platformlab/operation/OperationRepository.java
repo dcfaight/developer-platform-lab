@@ -11,11 +11,19 @@ import java.util.UUID;
 import io.github.dcfaight.platformlab.config.RequestCorrelationFilter;
 import org.slf4j.MDC;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
 @Repository
 public class OperationRepository {
     private final JdbcTemplate jdbc;
+    private static final RowMapper<OperationRecord> MAPPER = (rs, row) -> new OperationRecord(
+            rs.getObject("id", UUID.class), rs.getObject("environment_id", UUID.class),
+            rs.getString("type"), rs.getString("status"), rs.getInt("attempt_count"),
+            instant(rs, "next_attempt_at"), instant(rs, "lease_expires_at"), instant(rs, "started_at"),
+            instant(rs, "completed_at"), instant(rs, "created_at"), instant(rs, "updated_at"),
+            rs.getString("failure_code"), rs.getString("failure_message"), rs.getString("progress_step"),
+            rs.getString("correlation_id"));
 
     public OperationRepository(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
@@ -32,13 +40,26 @@ public class OperationRepository {
     }
 
     public Optional<OperationRecord> find(UUID id) {
-        return jdbc.query("SELECT * FROM operations WHERE id = ?",
-                (rs, row) -> new OperationRecord(rs.getObject("id", UUID.class),
-                        rs.getObject("environment_id", UUID.class), rs.getString("type"), rs.getString("status"),
-                        rs.getInt("attempt_count"), instant(rs, "next_attempt_at"), instant(rs, "lease_expires_at"),
-                        instant(rs, "started_at"), instant(rs, "completed_at"), instant(rs, "created_at"),
-                        instant(rs, "updated_at"), rs.getString("failure_code"), rs.getString("failure_message"),
-                        rs.getString("progress_step"), rs.getString("correlation_id")), id).stream().findFirst();
+        return jdbc.query("SELECT * FROM operations WHERE id = ?", MAPPER, id).stream().findFirst();
+    }
+
+    public List<OperationRecord> page(UUID environmentId, int page, int size) {
+        return jdbc.query("""
+                SELECT * FROM operations WHERE environment_id = ?
+                ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+                """, MAPPER, environmentId, size, (long) page * size);
+    }
+
+    public long count(UUID environmentId) {
+        return jdbc.queryForObject("SELECT count(*) FROM operations WHERE environment_id = ?",
+                Long.class, environmentId);
+    }
+
+    public OperationResponse response(OperationRecord record) {
+        return new OperationResponse(record.id(), record.environmentId(), record.type(), record.status(),
+                record.attemptCount(), record.nextAttemptAt(), record.leaseExpiresAt(), record.startedAt(),
+                record.completedAt(), record.createdAt(), record.updatedAt(), record.failureCode(),
+                record.failureMessage(), record.progressStep(), record.correlationId(), events(record.id()));
     }
 
     public List<OperationEvent> events(UUID id) {

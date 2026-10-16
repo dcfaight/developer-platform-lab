@@ -92,7 +92,13 @@ from a consistent database snapshot. A valid page beyond the last page returns a
   "status": "REQUESTED",
   "expiresAt": "2026-10-16T13:00:00Z",
   "createdAt": "2026-10-16T05:00:00Z",
-  "updatedAt": "2026-10-16T05:00:00Z"
+  "updatedAt": "2026-10-16T05:00:00Z",
+  "latestOperation": {
+    "id": "27f56e9b-382a-4373-a26c-c4dab824d127",
+    "type": "CREATE_ENVIRONMENT",
+    "status": "PENDING",
+    "progressStep": "ACCEPTED"
+  }
 }
 ```
 
@@ -100,6 +106,24 @@ List `items` use this same DTO. The namespace is `env-` followed by the
 environment UUID with hyphens removed. Worker-enabled provisioning creates this
 namespace only if it is absent or already owned by this environment. Environment
 status progresses through `REQUESTED`, `PROVISIONING`, and `READY` or `FAILED`.
+`latestOperation` is an additive read-only summary of the newest operation by
+`createdAt DESC, id DESC`, or `null` when none exists. `PENDING` and `RUNNING`
+indicate an active operation. This summary does not change creation responses.
+
+## Read environment operation history
+
+`GET /api/v1/environments/{id}/operations?page=0&size=20` returns `200 OK`
+with the same pagination envelope as the environment list. Each `items` entry
+has the full operation-detail shape below, including sanitized failure fields
+and progress events. Operations are ordered by `createdAt DESC, id DESC`;
+events within each operation retain their chronological backend order.
+
+Page/size defaults and bounds match the environment list. Items, events, and
+totals are read in one consistent database snapshot. An existing environment
+with no operations, or a page beyond the last, returns empty `items` with actual
+totals. Invalid identifiers/parameters return `400`; a missing environment
+returns `404`. History is scoped to the requested environment. No new write
+or provisioning behavior is introduced.
 
 ## Read an operation
 
