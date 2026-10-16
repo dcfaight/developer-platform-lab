@@ -6,6 +6,12 @@ This records the platform's starting point before deploying the platform service
 themselves to Kubernetes. It is a baseline and roadmap, not a deployment guide or
 a claim of production readiness.
 
+First-pass implementation is now available in `infra/kubernetes/`; see the
+[K3s API-only runbook](../infra/README.md#local-k3s-platform-api-only).
+It packages the UI, API, persistent PostgreSQL, and local TLS ingress, but does
+not enable the worker or establish completed K3s lifecycle/recovery validation.
+The assessment and unchecked roadmap below describe the original baseline.
+
 ## Current platform and workflows
 
 - **Frontend:** React, TypeScript, and Vite provide the environment lifecycle and

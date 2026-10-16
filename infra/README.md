@@ -17,8 +17,9 @@ kind delete cluster --name developer-platform-lab
 ```
 
 The backend worker builds the approved namespace and sample Deployment manifest
-in its Kubernetes package. `kubernetes/` remains reserved for future standalone
-manifests, quotas, and RBAC. There is no arbitrary manifest or image input.
+in its Kubernetes package. The separate [K3s packaging](#local-k3s-platform-api-only)
+in `kubernetes/` deploys the platform itself, not those sample workloads.
+There is no arbitrary manifest or image input.
 
 Enable the worker as described in [backend/README.md](../backend/README.md).
 It requires the `kind-developer-platform-lab` kubeconfig context and a loopback
@@ -160,10 +161,8 @@ trusted-loopback HTTP only and is not extended to this TLS endpoint in this slic
   Rotate password hashes by recreating the backend. There is no certificate
   renewal, SSO, external secrets, rate limiting, read authorization, per-owner
   RBAC, multi-tenant isolation, database transport TLS, or worker service-account
-  design here. No Kubernetes deployment manifests are claimed: future pod
-  deployment must disable automatic service-account-token mounting for the
-  API/portal, use restricted pod security/non-root/read-only roots, and design
-  narrowly scoped worker RBAC before enabling Kubernetes access.
+  design here. The separate K3s packaging below does not enable worker access
+  either; narrowly scoped worker RBAC must be designed before enabling it.
 - Stop with `docker compose -f compose.deploy.yaml down`; this retains the
   database volume. `down --volumes` permanently deletes deployment history:
   use only for disposable tests after confirming the project name.
@@ -185,3 +184,180 @@ Without that opt-in, automation discovery only validates deployment configuratio
 and missing-setting failures. Backend tests separately verify database-loss
 readiness versus liveness. A successful API probe does not prove kind provisioning,
 namespace deletion, backup recovery, certificate renewal or production readiness.
+
+## Local K3s platform (API-only)
+
+`kubernetes/` is a first-pass Kustomize package for a **separate, single-node K3s**
+installation: one backend API, one frontend, PostgreSQL 18.6 with a 5Gi
+`local-path` PVC, ClusterIP Services, generated ConfigMaps, external Secrets, and
+a Traefik TLS Ingress. It reuses the existing Dockerfiles without changing Compose
+or the host-run kind workflow. The [baseline](../docs/pre-kubernetes.md) remains
+the roadmap, not evidence of completed lifecycle validation.
+
+**Boundary:** the `deploy` profile and explicit worker disablement make this
+API-only. Authenticated creates are persisted but remain pending; accepted
+deletions cannot complete. Do not connect the kind worker to this database, mount
+admin kubeconfig, or enable the worker in these manifests. In-cluster worker
+authentication/RBAC and end-to-end provisioning are later work.
+
+### Prerequisites and images
+
+Use Bash, Docker, kubectl with Kustomize, OpenSSL, and an existing K3s node with
+the default `local-path` provisioner. Traefik with its `websecure` entrypoint is
+needed only for ingress; TLS port-forwarding below also works without Traefik.
+Run the commands from the repository root. Explicitly select the K3s context,
+**not** `kind-developer-platform-lab`:
+
+```sh
+export K3S_CONTEXT=your-k3s-context
+kubectl --context "$K3S_CONTEXT" get nodes
+kubectl --context "$K3S_CONTEXT" get storageclass local-path
+kubectl --context "$K3S_CONTEXT" get ingressclass traefik
+docker build -t platform-lab-backend:k3s-v1 ./backend
+docker build -t platform-lab-frontend:k3s-v1 ./frontend
+docker save platform-lab-backend:k3s-v1 platform-lab-frontend:k3s-v1 \
+  -o /tmp/platform-lab-images.tar
+# Run on the K3s node (copy the archive there first if building elsewhere):
+sudo k3s ctr images import /tmp/platform-lab-images.tar
+rm /tmp/platform-lab-images.tar
+```
+
+Build for the node's architecture. Docker's image store is **not** K3s's containerd
+store. Both app images use `imagePullPolicy: Never` intentionally: import them on
+the node or pods fail with `ErrImageNeverPull`. PostgreSQL is pulled from Docker
+Hub. For updates, build/import a new tag and update `images` in
+`infra/kubernetes/kustomization.yaml` before reapplying; do not silently reuse tags.
+Registry distribution and multi-node scheduling are not provided.
+
+### Secrets and TLS
+
+No usable credentials, hashes, or private keys are committed. Create the namespace
+and two required Secrets separately; applying the package alone fails closed
+until they exist. Generate the operator password hash using the existing
+[backend recipe](../backend/README.md#authentication-and-authorization).
+Use a **different database password** from development/Compose.
+
+```sh
+kubectl --context "$K3S_CONTEXT" apply -f infra/kubernetes/namespace.yaml
+SECRET_DIR="$(mktemp -d /tmp/platform-k3s-secrets.XXXXXX)"
+chmod 700 "$SECRET_DIR"
+read -r -s -p 'Database password: ' DB_PASSWORD; echo
+printf '%s' "$DB_PASSWORD" > "$SECRET_DIR/database-password"
+read -r -p 'Operator username: ' OPERATOR_USERNAME
+printf '%s' "$OPERATOR_USERNAME" > "$SECRET_DIR/operator-username"
+read -r -s -p 'Operator password hash (not plaintext): ' OPERATOR_HASH; echo
+printf '%s' "$OPERATOR_HASH" > "$SECRET_DIR/operator-password-hash"
+chmod 600 "$SECRET_DIR/"*
+kubectl --context "$K3S_CONTEXT" -n platform-lab create secret generic platform-secrets \
+  --from-file="$SECRET_DIR/database-password" \
+  --from-file="$SECRET_DIR/operator-username" \
+  --from-file="$SECRET_DIR/operator-password-hash"
+rm -rf "$SECRET_DIR"
+unset DB_PASSWORD OPERATOR_USERNAME OPERATOR_HASH SECRET_DIR
+```
+
+Values must be nonempty. Secrets are Kubernetes Secrets, **not** an external secret
+manager: restrict cluster access and configure K3s secrets encryption separately.
+Avoid shell tracing and never commit credentials or generated Secret YAML.
+
+For disposable local testing, create a one-day certificate **outside the checkout**:
+
+```sh
+TLS_DIR="$(mktemp -d /tmp/platform-k3s-tls.XXXXXX)"
+chmod 700 "$TLS_DIR"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -keyout "$TLS_DIR/tls.key" -out "$TLS_DIR/tls.crt" \
+  -subj /CN=platform.localhost -addext 'subjectAltName=DNS:platform.localhost'
+chmod 600 "$TLS_DIR/tls.key"
+kubectl --context "$K3S_CONTEXT" -n platform-lab create secret tls platform-tls \
+  --cert="$TLS_DIR/tls.crt" --key="$TLS_DIR/tls.key"
+```
+
+For longer use, supply a certificate and chain trusted by clients for your chosen
+hostname; update both ingress `rules.host` and `tls.hosts` if not using
+`platform.localhost`. There is no cert-manager, issuance, or automatic renewal.
+The Secret also provides nginx's direct TLS endpoint, with group-readable key
+permissions for UID/GID 101. Never bypass TLS verification or send Basic
+credentials over HTTP.
+
+### Apply and smoke-test
+
+```sh
+kubectl kustomize infra/kubernetes
+kubectl --context "$K3S_CONTEXT" apply --dry-run=server -k infra/kubernetes
+kubectl --context "$K3S_CONTEXT" apply -k infra/kubernetes
+kubectl --context "$K3S_CONTEXT" -n platform-lab rollout status deployment/postgres --timeout=180s
+kubectl --context "$K3S_CONTEXT" -n platform-lab rollout status deployment/backend --timeout=300s
+kubectl --context "$K3S_CONTEXT" -n platform-lab rollout status deployment/frontend --timeout=180s
+kubectl --context "$K3S_CONTEXT" -n platform-lab get pods,svc,pvc,ingress
+PLATFORM_K3S_TEST=true PLATFORM_K3S_CONTEXT="$K3S_CONTEXT" \
+  python3 -m unittest discover -s automation/tests -p test_kubernetes.py -v
+```
+
+Services must exist before nginx starts so that it can resolve `backend` through
+cluster DNS; `apply -k` creates them before Deployments. nginx resolves that stable
+Service address on startup, not via Docker's `127.0.0.11` resolver. Restart nginx
+if replacing the backend Service with a different ClusterIP.
+
+For TLS ingress, map `platform.localhost` to the K3s node's reachable IP in local
+DNS/hosts, or use curl's explicit override:
+
+```sh
+export K3S_NODE_IP=192.0.2.10 # Replace with your node's reachable address.
+curl --fail --cacert "$TLS_DIR/tls.crt" \
+  --resolve "platform.localhost:443:$K3S_NODE_IP" https://platform.localhost/
+curl --fail --cacert "$TLS_DIR/tls.crt" \
+  --resolve "platform.localhost:443:$K3S_NODE_IP" https://platform.localhost/api/v1/environments
+```
+
+The ingress is HTTPS-only on Traefik's `websecure` entrypoint, not an HTTP redirect.
+It terminates TLS and forwards to nginx's cluster-internal HTTP listener; nginx
+proxies only `/api/v1/` to the backend, not `/actuator`. Cluster-internal traffic is
+not encrypted or isolated in this pass. Restrict node/firewall access to trusted
+local clients: reads remain anonymous, and this is not safe public exposure.
+
+Without ingress, keep this running in another terminal:
+
+```sh
+kubectl --context "$K3S_CONTEXT" -n platform-lab port-forward --address 127.0.0.1 svc/frontend 8443:443
+```
+
+Then use `curl --fail --cacert "$TLS_DIR/tls.crt" --resolve
+platform.localhost:8443:127.0.0.1 https://platform.localhost:8443/` (on one line).
+For browser use, map the hostname locally and trust the test certificate explicitly.
+Sign in with the operator's **plaintext** password, not its hash.
+
+The offline check is `python3 -m unittest discover -s automation/tests -p
+test_kubernetes.py -v` (on one line); it renders manifests when kubectl is present.
+Live checks are opt-in and read-only: they verify availability, a bound PVC,
+worker disablement, UI/API routing and private management paths. They do not
+prove ingress/TLS, worker lifecycle, restart persistence, or recovery.
+
+### Persistence, startup, and remaining work
+
+- PostgreSQL initializes its database/user/password only on an **empty** volume.
+  Its mount is `/var/lib/postgresql`, matching the PostgreSQL 18 image and Compose.
+  One replica and `Recreate` avoid concurrent database pods using the same data.
+  K3s local-path data is node-local, not HA or a backup.
+- Flyway migrations run in backend startup, before readiness. There is no ordered
+  pod startup: the backend may restart until PostgreSQL accepts connections.
+  Its startup probe allows five minutes; readiness includes the database,
+  liveness does not. The UI probe checks nginx, not API availability.
+- Pod restarts/reapplying preserve the PVC. **Deleting the PVC or namespace can
+  permanently delete data** with local-path's default Delete reclaim policy.
+  `kubectl delete -k` also deletes the PVC/namespace: it is a destructive teardown,
+  not a routine stop. Do not use it to upgrade.
+- Secret updates need app restarts; nginx also needs a restart to reload renewed
+  TLS certificates. Changing the database Secret does **not** change the password
+  inside an initialized database: coordinate a database-side password rotation
+  before restarting consumers. Back up before image/schema upgrades; migration
+  rollback is not assured.
+- App pods run non-root with read-only roots, bounded memory-backed `/tmp`,
+  dropped capabilities, seccomp, resource requests/limits and no service-account
+  token. PostgreSQL retains its image's initialization privileges. These are
+  useful defaults, not validated production hardening.
+- **TODO:** test backup/restore and restart persistence on K3s; implement in-cluster
+  worker client/authentication/RBAC without weakening ownership/deletion guards;
+  add network policies, database role separation, secret encryption/rotation,
+  certificate renewal and access review; validate the full environment lifecycle.
+  No expiration scheduler or cleanup-CLI TLS extension is included.
