@@ -21,8 +21,6 @@ public class WorkerRepository {
                         WHEN started_at + (? * interval '1 millisecond') <= clock_timestamp()
                             THEN CASE WHEN type = 'DELETE_ENVIRONMENT' THEN 'DELETION_TIMEOUT'
                                 ELSE 'READINESS_TIMEOUT' END
-                        WHEN type = 'CREATE_ENVIRONMENT' AND provisioned_at IS NULL
-                            AND attempt_count >= ? THEN 'ATTEMPTS_EXHAUSTED'
                         END AS exhausted
                     FROM operations
                     WHERE (status = 'PENDING' AND next_attempt_at <= clock_timestamp())
@@ -43,7 +41,6 @@ public class WorkerRepository {
                         failure_message = CASE c.exhausted
                             WHEN 'DELETION_TIMEOUT' THEN 'The Kubernetes namespace did not disappear before the deletion deadline.'
                             WHEN 'READINESS_TIMEOUT' THEN 'The environment did not become ready before the provisioning deadline.'
-                            WHEN 'ATTEMPTS_EXHAUSTED' THEN 'Provisioning did not complete within its attempt limits.'
                             ELSE NULL END,
                         progress_step = CASE WHEN c.exhausted IS NOT NULL THEN 'FAILED'
                             WHEN o.type = 'DELETE_ENVIRONMENT' THEN 'DELETING'
@@ -59,9 +56,13 @@ public class WorkerRepository {
                     FROM changed c WHERE e.id = c.environment_id
                 ), event AS (
                     INSERT INTO operation_events (operation_id, type, code, message, correlation_id)
-                    SELECT id, CASE WHEN status = 'FAILED' THEN 'FAILED' ELSE 'CLAIMED' END,
-                        COALESCE(failure_code, 'CLAIMED'),
-                        COALESCE(failure_message, 'Worker acquired the operation.'), correlation_id FROM changed
+                    SELECT c.id, CASE WHEN c.status = 'FAILED' THEN 'FAILED' ELSE 'CLAIMED' END,
+                        COALESCE(c.failure_code, CASE WHEN previous.status = 'RUNNING'
+                            THEN 'LEASE_RECOVERED' ELSE 'CLAIMED' END),
+                        COALESCE(c.failure_message, CASE WHEN previous.status = 'RUNNING'
+                            THEN 'Worker reclaimed the operation after its previous lease expired; resuming persisted progress.'
+                            ELSE 'Worker acquired the operation.' END), c.correlation_id
+                    FROM changed c JOIN candidate previous ON previous.id = c.id
                 )
                 SELECT changed.*, (SELECT id FROM operations WHERE environment_id = changed.environment_id
                     AND type = 'CREATE_ENVIRONMENT') AS create_operation_id
@@ -72,7 +73,7 @@ public class WorkerRepository {
                 rs.getInt("failure_count"), rs.getString("type"),
                 rs.getObject("create_operation_id", UUID.class), rs.getInt("attempt_count")),
                 properties.readinessTimeout().toMillis(),
-                properties.maxAttempts(), UUID.randomUUID(), properties.leaseDuration().toMillis())
+                UUID.randomUUID(), properties.leaseDuration().toMillis())
                 .stream().findFirst();
     }
 

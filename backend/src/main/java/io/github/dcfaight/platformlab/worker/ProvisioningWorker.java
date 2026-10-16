@@ -64,7 +64,17 @@ public class ProvisioningWorker {
                     if (!operations.owns(claim)) {
                         return;
                     }
-                    provisioner.provision(environment, claim.id(), () -> operations.owns(claim));
+                    provisioner.provision(environment, claim.id(), () -> {
+                        if (!operations.owns(claim)) {
+                            return false;
+                        }
+                        // Observe resources accepted before a crash before enforcing the write budget.
+                        if (claim.attemptCount() > properties.maxAttempts()) {
+                            throw new ProvisioningException("ATTEMPTS_EXHAUSTED",
+                                    "Provisioning did not complete within its attempt limits.", false);
+                        }
+                        return true;
+                    });
                     if (!operations.provisioned(claim)) {
                         return;
                     }

@@ -146,6 +146,9 @@ Multiple backend instances may share PostgreSQL. Each uses a unique claim token
 and short database transactions; Kubernetes calls never hold database row locks.
 Due operations are claimed with `FOR UPDATE SKIP LOCKED`, and abandoned leases
 are reclaimable after restart. Old/expired claim holders cannot publish results.
+Recovery waits for the persisted lease to expire; startup does not revoke leases
+that another backend may still own. Reclaimed operations retain the `CLAIMED`
+event type with code `LEASE_RECOVERED` and an explanatory message in operation detail.
 
 The client explicitly selects `kind-developer-platform-lab`, requires a loopback
 HTTPS API server, and rejects executable credential plugins. It does not use the
@@ -181,6 +184,12 @@ failures are terminal. A readiness deadline prevents indefinite waiting.
 Operation detail retains UTC timestamps, attempt counts, sanitized messages,
 and progress events. Lease expiry permits at-least-once execution; idempotent
 Kubernetes reconciliation and database fencing protect repeated work.
+Queued work and retry delays survive restart, as do provisioned/waiting checkpoints
+and terminal results. After a crash before a provisioning checkpoint, the worker
+re-reads owned resources and only creates or updates what is missing or different.
+Even after the last provisioning attempt, matching resources can be checkpointed
+and continue to readiness without another write; additional mutations fail with
+`ATTEMPTS_EXHAUSTED`. Restarts do not reset attempt budgets or deadlines.
 
 ## Safe asynchronous deletion
 

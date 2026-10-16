@@ -113,6 +113,75 @@ class WorkerTests {
     }
 
     @Test
+    void queuedOperationSurvivesRestartWithItsScheduleAndIdentity() {
+        UUID id = create();
+        jdbc.update("UPDATE operations SET next_attempt_at = clock_timestamp() + interval '1 hour' WHERE id = ?", id);
+        var queued = operations.find(id).orElseThrow();
+        worker = new ProvisioningWorker(new WorkerRepository(jdbc), environments, provisioner, properties);
+        worker.poll();
+        assertEquals(queued, operations.find(id).orElseThrow());
+        verifyNoInteractions(provisioner);
+
+        when(provisioner.isReady(any())).thenReturn(true);
+        due(id);
+        worker.poll();
+        assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
+        assertEquals(1, operations.count(queued.environmentId()));
+    }
+
+    @Test
+    void restartWaitsForClaimExpiryThenResumesWithADurableRecoveryEvent() {
+        UUID id = create();
+        var abandoned = repository.claim(properties).orElseThrow();
+        var started = operations.find(id).orElseThrow().startedAt();
+        worker = new ProvisioningWorker(new WorkerRepository(jdbc), environments, provisioner, properties);
+        worker.poll();
+        verifyNoInteractions(provisioner);
+        assertEquals(1, operations.events(id).size());
+
+        expire(id);
+        when(provisioner.isReady(any())).thenReturn(true);
+        worker.poll();
+        assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
+        assertEquals(started, operations.find(id).orElseThrow().startedAt());
+        assertEquals("LEASE_RECOVERED", operations.events(id).get(1).code());
+        assertTrue(operations.events(id).get(1).message().contains("previous lease expired"));
+        assertFalse(repository.owns(abandoned));
+        assertFalse(repository.fail(abandoned, "FAILED", "Stale failure."));
+        assertEquals("READY", environmentStatus(id));
+    }
+
+    @Test
+    void restartAfterLastAcceptedProvisioningContinuesWithoutAnotherWrite() {
+        UUID id = create();
+        for (int i = 0; i < properties.maxAttempts() - 1; i++) {
+            repository.claim(properties).orElseThrow();
+            expire(id);
+        }
+        doAnswer(invocation -> {
+            assertTrue(((java.util.function.BooleanSupplier) invocation.getArgument(2)).getAsBoolean());
+            throw new Error("Simulated process termination after Kubernetes accepted resources");
+        }).when(provisioner).provision(any(), any(), any());
+        assertThrows(Error.class, worker::poll);
+        assertEquals("RUNNING", operations.find(id).orElseThrow().status());
+        assertNull(jdbc.queryForObject("SELECT provisioned_at FROM operations WHERE id = ?",
+                java.sql.Timestamp.class, id));
+
+        expire(id);
+        // Matching resources need no mutation callback, just like a terminating/absent namespace on DELETE.
+        doNothing().when(provisioner).provision(any(), any(), any());
+        when(provisioner.isReady(any())).thenReturn(true);
+        worker = new ProvisioningWorker(new WorkerRepository(jdbc), environments, provisioner, properties);
+        worker.poll();
+        assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
+        assertEquals("READY", environmentStatus(id));
+        assertEquals(properties.maxAttempts() + 1, operations.find(id).orElseThrow().attemptCount());
+        assertEquals("LEASE_RECOVERED", operations.events(id).get(properties.maxAttempts()).code());
+        worker.poll();
+        verify(provisioner, times(2)).provision(any(), eq(id), any());
+    }
+
+    @Test
     void deletingOperationCascadesDurableEvents() {
         UUID id = create();
         worker.poll();
@@ -240,8 +309,15 @@ class WorkerTests {
             expire(id);
         }
         var restart = new WorkerRepository(jdbc);
-        assertEquals("FAILED", restart.claim(properties).orElseThrow().status());
-        assertEquals(3, operations.find(id).orElseThrow().attemptCount());
+        doAnswer(invocation -> {
+            ((java.util.function.BooleanSupplier) invocation.getArgument(2)).getAsBoolean();
+            fail("An exhausted reclaim must not issue a Kubernetes write");
+            return null;
+        }).when(provisioner).provision(any(), any(), any());
+        worker = new ProvisioningWorker(restart, environments, provisioner, properties);
+        worker.poll();
+        assertEquals("FAILED", operations.find(id).orElseThrow().status());
+        assertEquals(4, operations.find(id).orElseThrow().attemptCount());
         assertEquals("ATTEMPTS_EXHAUSTED", operations.find(id).orElseThrow().failureCode());
         assertEquals("Provisioning did not complete within its attempt limits.",
                 operations.find(id).orElseThrow().failureMessage());
