@@ -13,7 +13,10 @@ function App() {
   }, [])
   const match = /^#environment\/([a-f0-9-]{36})$/i.exec(hash)
   return <div className="app-shell">
-    <a className="skip-link" href="#main-content">Skip to content</a>
+    <a className="skip-link" href="#main-content" onClick={(event) => {
+      event.preventDefault()
+      document.getElementById('main-content')?.focus()
+    }}>Skip to content</a>
     <header className="site-header"><a href="#environments" className="brand">DPL <span>Developer Platform Lab</span></a>
       <span className="read-only">Read-only portal</span></header>
     <main id="main-content" tabIndex={-1}>
