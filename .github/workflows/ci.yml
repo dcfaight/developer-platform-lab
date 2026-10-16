@@ -40,6 +40,8 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: maven
+      - name: Verify Docker availability for Testcontainers
+        run: docker info
       - run: ./mvnw --batch-mode verify
 
   scaffold:

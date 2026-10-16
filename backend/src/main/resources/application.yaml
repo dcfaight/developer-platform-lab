@@ -1,7 +1,21 @@
 spring:
   application:
     name: developer-platform-lab
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://127.0.0.1:5432/platform_lab}
+    username: ${DB_USERNAME:platform_lab}
+    password: ${DB_PASSWORD}
+  jackson:
+    mapper:
+      allow-coercion-of-scalars: false
+    deserialization:
+      fail-on-unknown-properties: true
+      accept-float-as-int: false
 
 server:
   address: 127.0.0.1
   port: 8080
+  error:
+    include-message: never
+    include-stacktrace: never
+    include-binding-errors: never

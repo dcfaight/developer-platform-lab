@@ -2,7 +2,9 @@
 
 A hands-on internal developer platform for provisioning development environments, deploying a sample application, and understanding operational status through a self-service portal.
 
-> **Project status:** Design phase. This README describes the intended architecture and delivery plan, not features that are already implemented.
+> **Project status:** Persistent backend slice implemented: PostgreSQL-backed environment requests, durable idempotency, and environment/operation reads. The frontend remains a static scaffold. Provisioning, workers, deletion, and cleanup are not implemented.
+>
+> Except where marked as available now, this README preserves the intended architecture and delivery blueprint, not a claim that the full platform is implemented.
 >
 > **Disclaimer:** This is an independent portfolio project inspired by platform engineering challenges. It is not an eBay product and does not reproduce eBay’s proprietary systems.
 
@@ -222,9 +224,11 @@ This is a planned structure. Directories will be introduced as their functionali
 
 The directories above now have starter files or explicit placeholders.
 The backend base package is `io.github.dcfaight.platformlab`.
-The frontend renders a static page, and the backend starts without database
-or cluster access. API routes, persistence, workers, cleanup, and the sample
-workload remain unimplemented. Area README files describe the current scope.
+The frontend renders a static page. The backend now requires PostgreSQL and
+implements persistent environment creation requests and environment/operation
+reads, with Flyway migrations and durable idempotency. Workers, cleanup,
+deletion, and the sample workload remain unimplemented; Kubernetes is not
+required for this slice. Area README files describe the current scope.
 `docs/decisions/` and `docs/runbooks/` are reserved for future operational documentation.
 
 ## 8. Domain Model
@@ -306,7 +310,11 @@ The MVP uses an explicitly labeled local-development actor. This is not a substi
 
 ## 9. Proposed REST API
 
-All routes use the `/api/v1` prefix.
+All routes use the `/api/v1` prefix. This table preserves the target blueprint.
+Currently implemented: `POST /environments`, `GET /environments` (pagination
+only, no status filter), `GET /environments/{id}`, and `GET /operations/{id}`.
+Deletion and events routes are not implemented. The only current states are
+`REQUESTED` and `PENDING`; accepting a request does not provision resources.
 
 | Method | Route | Purpose |
 |---|---|---|
@@ -328,7 +336,8 @@ All routes use the `/api/v1` prefix.
 - Errors include a stable code, useful message, and request identifier.
 - Kubernetes credentials and sensitive internal details are never returned.
 
-The detailed request and response schemas will be defined in `docs/api.md`.
+The implemented request and response schemas, validation, pagination, errors,
+and durable idempotency guarantees are defined in [docs/api.md](docs/api.md).
 
 ## 10. Reliable Background Work
 
@@ -438,14 +447,15 @@ Executable commands will be added and verified during implementation.
 
 Until authentication and additional hardening exist, run this project only in a trusted local environment. Do not expose it publicly.
 
-### Scaffold quick start (available now)
+### Persistent backend quick start (available now)
 
 Prerequisites: Node.js 24 with npm 11, Java 17, and Python 3.12.
 The backend includes Maven Wrapper; a global Maven installation is not required.
 Frontend dependencies are pinned in `frontend/package-lock.json`, and the
-Spring Boot and Maven versions are pinned in the backend build files.
-Docker with Compose is needed only for PostgreSQL; Docker, kind, and kubectl
-are needed for the optional local cluster.
+Spring Boot 4.1.1 and Maven versions are pinned in the backend build files.
+Docker with Compose is required for local PostgreSQL; backend integration tests
+also require Docker (Testcontainers `postgres:18.6`, no skipping).
+kind and kubectl are needed only for the optional local cluster.
 
 From the repository root, prepare local PostgreSQL:
 
@@ -453,9 +463,19 @@ From the repository root, prepare local PostgreSQL:
 cp .env.example .env
 # Edit .env and set POSTGRES_PASSWORD to a nonempty local-only value.
 docker compose up -d --wait postgres
+
+# Spring Boot does not automatically load Compose's .env.
+# Source only your trusted local file: this executes shell code.
+set -a
+. ./.env
+set +a
+export DB_URL="jdbc:postgresql://127.0.0.1:${POSTGRES_PORT}/${POSTGRES_DB}"
+export DB_USERNAME="$POSTGRES_USER"
+export DB_PASSWORD="$POSTGRES_PASSWORD"
 ```
 
-Run the apps in separate terminals:
+Run the backend in that same shell (or configure the same `DB_*` variables in
+IntelliJ). Run the frontend in a separate terminal:
 
 ```sh
 cd backend
@@ -468,19 +488,25 @@ npm ci
 npm run dev
 ```
 
-The portal is at http://localhost:5173. The backend listens on
-http://127.0.0.1:8080 but has no API routes yet (404 responses are expected).
-Neither starter uses PostgreSQL yet; starting Compose is optional for now.
-Compose reads `.env`; the backend does not load it automatically.
+The static portal is at http://localhost:5173; it is not connected to the API.
+The backend listens on http://127.0.0.1:8080 and applies Flyway migrations on
+startup. `DB_URL` defaults to
+`jdbc:postgresql://127.0.0.1:5432/platform_lab`, `DB_USERNAME` to `platform_lab`,
+and `DB_PASSWORD` is required with no default.
+See [backend/README.md](backend/README.md#manual-api-checks) for copyable curl
+checks covering creation, normalized replay, conflicts, list/detail reads,
+errors, and restart persistence. No authentication or CORS is added; the audit
+actor is fixed to local development, never supplied by caller headers.
 See [infra/README.md](infra/README.md) for the optional kind cluster.
-There is no sample image to build or environment workflow to run yet.
+There is no sample image or provisioning workflow yet.
 
-Scaffold checks from the repository root (also run by CI):
+Checks from the repository root (also run by CI):
 
 ```sh
 npm --prefix frontend ci
 npm --prefix frontend run lint
 npm --prefix frontend run build
+docker info
 (cd backend && ./mvnw verify)
 python -m compileall -q automation
 docker compose config --quiet
@@ -489,11 +515,19 @@ docker compose config --quiet
 The Compose check requires the configured password in `.env`.
 On Windows use `mvnw.cmd` in place of `./mvnw`.
 Stop PostgreSQL with `docker compose down`; data persists in a named volume.
+Backend and PostgreSQL restarts preserve environments, operations, audit
+history, and idempotency reservations. Replaying a key after restart returns
+the original accepted response without additional writes.
 Use `docker compose down --volumes` only when intentionally discarding local data.
 
 ## 15. Testing Strategy
 
 ### Backend
+
+The current slice is verified with `./mvnw verify` and a mandatory Docker-backed
+Testcontainers PostgreSQL 18.6 instance. CI runs `docker info` before verifying;
+Docker unavailability is a failure, not a skipped integration suite.
+Worker and lifecycle checks below remain part of the target strategy.
 
 - Input validation.
 - State transitions.
