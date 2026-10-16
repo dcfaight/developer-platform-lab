@@ -3,6 +3,7 @@ import { environment, operationPage } from '../../api/client'
 import type { Operation } from '../../api/client'
 import { useResource } from '../../api/useResource'
 import { Pagination } from '../../components/Pagination'
+import { OperationFailure } from '../../components/OperationFailure'
 import { ResourceState } from '../../components/ResourceState'
 import { Status, Timestamp } from '../../components/Status'
 import { DeleteEnvironment } from './DeleteEnvironment'
@@ -15,10 +16,7 @@ function OperationCard({ item }: { item: Operation }) {
     </div>
     <p className="progress-step">Current step: <strong>{item.progressStep?.replaceAll('_', ' ') ?? 'Awaiting progress'}</strong>
       {' · '}{item.attemptCount} {item.attemptCount === 1 ? 'attempt' : 'attempts'}</p>
-    {(item.failureCode || item.failureMessage) && <div className="notice error">
-      <strong>{item.status === 'FAILED' ? 'Failure summary' : 'Last failure (retry may be pending)'}</strong>
-      <code>{item.failureCode}</code><p>{item.failureMessage}</p>
-    </div>}
+    <OperationFailure item={item} />
     <dl className="metadata">
       <div><dt>Created</dt><dd><Timestamp value={item.createdAt} /></dd></div>
       <div><dt>Started</dt><dd><Timestamp value={item.startedAt} /></dd></div>
@@ -84,6 +82,7 @@ export function EnvironmentDetail({ id }: { id: string }) {
             ? <><Status value={item.latestOperation.status} /><code>{item.latestOperation.id}</code></>
             : 'No operations'}</dd></div>
         </dl>
+        {item.latestOperation && <OperationFailure item={item.latestOperation} />}
         <p className="muted">Expiry is metadata only; automatic cleanup is not implemented.</p>
         <DeleteEnvironment key={id} item={item} unavailable={resource.busy || !!resource.error}
           onRefresh={() => {

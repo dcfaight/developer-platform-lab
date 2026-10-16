@@ -96,6 +96,8 @@ class OperationStatusTests {
         var detail = mapper.readTree(get(client, "/api/v1/environments/" + environmentId).body());
         assertEquals(id.toString(), detail.path("latestOperation").path("id").asText());
         assertEquals("FAILED", detail.path("latestOperation").path("status").asText());
+        assertEquals(status.path("failureCode"), detail.path("latestOperation").path("failureCode"));
+        assertEquals(status.path("failureMessage"), detail.path("latestOperation").path("failureMessage"));
         var list = mapper.readTree(get(client, "/api/v1/environments").body());
         assertEquals(detail, list.path("items").get(0));
 
@@ -116,6 +118,23 @@ class OperationStatusTests {
         assertEquals(id.toString(), older.path("items").get(0).path("id").asText());
         detail = mapper.readTree(get(client, "/api/v1/environments/" + environmentId).body());
         assertEquals(newerId.toString(), detail.path("latestOperation").path("id").asText());
+        assertTrue(detail.path("latestOperation").path("failureCode").isNull());
+        assertTrue(detail.path("latestOperation").path("failureMessage").isNull());
+        var deletionClaim = worker.claim(new WorkerProperties(Duration.ofSeconds(30), 5, Duration.ofSeconds(2),
+                Duration.ofSeconds(5), Duration.ofMinutes(5))).orElseThrow();
+        assertEquals(newerId, deletionClaim.id());
+        worker.fail(deletionClaim, "KUBERNETES_AUTHENTICATION_FAILED",
+                "The Kubernetes API did not accept the worker credentials.");
+        var deletion = mapper.readTree(get(client, "/api/v1/operations/" + newerId).body());
+        detail = mapper.readTree(get(client, "/api/v1/environments/" + environmentId).body());
+        assertEquals("DELETE_FAILED", detail.path("status").asText());
+        assertEquals("FAILED", deletion.path("status").asText());
+        assertEquals("KUBERNETES_AUTHENTICATION_FAILED", deletion.path("failureCode").asText());
+        assertEquals(deletion.path("failureCode"), detail.path("latestOperation").path("failureCode"));
+        assertEquals(deletion.path("failureMessage"), detail.path("latestOperation").path("failureMessage"));
+        var deletionHistory = mapper.readTree(get(client, "/api/v1/environments/" + environmentId
+                + "/operations").body());
+        assertEquals(deletion, deletionHistory.path("items").get(0));
         assertEquals(0, mapper.readTree(get(client, "/api/v1/environments/" + environmentId
                 + "/operations?page=2&size=1").body()).path("items").size());
 

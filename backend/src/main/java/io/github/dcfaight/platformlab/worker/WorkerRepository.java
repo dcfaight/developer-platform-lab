@@ -40,10 +40,11 @@ public class WorkerRepository {
                         started_at = COALESCE(o.started_at, clock_timestamp()),
                         completed_at = CASE WHEN c.exhausted IS NOT NULL THEN clock_timestamp() ELSE NULL END,
                         failure_code = c.exhausted,
-                        failure_message = CASE WHEN c.exhausted IS NOT NULL THEN
-                            CASE WHEN c.type = 'DELETE_ENVIRONMENT'
-                                THEN 'Deletion did not complete within its limits.'
-                                ELSE 'Provisioning did not complete within its limits.' END ELSE NULL END,
+                        failure_message = CASE c.exhausted
+                            WHEN 'DELETION_TIMEOUT' THEN 'The Kubernetes namespace did not disappear before the deletion deadline.'
+                            WHEN 'READINESS_TIMEOUT' THEN 'The environment did not become ready before the provisioning deadline.'
+                            WHEN 'ATTEMPTS_EXHAUSTED' THEN 'Provisioning did not complete within its attempt limits.'
+                            ELSE NULL END,
                         progress_step = CASE WHEN c.exhausted IS NOT NULL THEN 'FAILED'
                             WHEN o.type = 'DELETE_ENVIRONMENT' THEN 'DELETING'
                             WHEN o.provisioned_at IS NULL THEN 'PROVISIONING' ELSE 'WAITING' END,

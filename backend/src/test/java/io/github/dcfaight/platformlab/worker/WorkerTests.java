@@ -152,6 +152,8 @@ class WorkerTests {
         worker.poll();
         assertEquals("FAILED", operations.find(id).orElseThrow().status());
         assertEquals("READINESS_TIMEOUT", operations.find(id).orElseThrow().failureCode());
+        assertEquals("The environment did not become ready before the provisioning deadline.",
+                operations.find(id).orElseThrow().failureMessage());
         assertEquals("FAILED", environmentStatus(id));
         assertEquals("FAILED", eventTypes(id).get(eventTypes(id).size() - 1));
     }
@@ -241,6 +243,8 @@ class WorkerTests {
         assertEquals("FAILED", restart.claim(properties).orElseThrow().status());
         assertEquals(3, operations.find(id).orElseThrow().attemptCount());
         assertEquals("ATTEMPTS_EXHAUSTED", operations.find(id).orElseThrow().failureCode());
+        assertEquals("Provisioning did not complete within its attempt limits.",
+                operations.find(id).orElseThrow().failureMessage());
         assertEquals("FAILED", environmentStatus(id));
         assertTrue(restart.claim(properties).isEmpty());
     }
@@ -476,7 +480,7 @@ class WorkerTests {
         worker.poll();
         assertEquals("FAILED", operations.find(id).orElseThrow().status());
         assertEquals("DELETION_TIMEOUT", operations.find(id).orElseThrow().failureCode());
-        assertEquals("Deletion did not complete within its limits.",
+        assertEquals("The Kubernetes namespace did not disappear before the deletion deadline.",
                 operations.find(id).orElseThrow().failureMessage());
         assertEquals("DELETE_FAILED", environmentStatus(id));
         verify(provisioner, times(1)).delete(any(), any(), any());

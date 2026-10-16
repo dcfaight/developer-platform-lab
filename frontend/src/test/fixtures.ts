@@ -14,6 +14,8 @@ export const demoEnvironment: Environment = {
     type: 'CREATE_ENVIRONMENT',
     status: 'RUNNING',
     progressStep: 'WAITING',
+    failureCode: null,
+    failureMessage: null,
   },
 }
 

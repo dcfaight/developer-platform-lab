@@ -151,7 +151,8 @@ public class EnvironmentService {
     private EnvironmentResponse response(EnvironmentRecord record) {
         var latest = operations.page(record.id(), 0, 1).stream().findFirst()
                 .map(operation -> new EnvironmentResponse.OperationSummary(operation.id(), operation.type(),
-                        operation.status(), operation.progressStep())).orElse(null);
+                        operation.status(), operation.progressStep(), operation.failureCode(),
+                        operation.failureMessage())).orElse(null);
         return new EnvironmentResponse(record.id(), record.name(), record.namespace(), record.templateId(),
                 record.status(), record.expiresAt(), record.createdAt(), record.updatedAt(), latest);
     }

@@ -378,6 +378,19 @@ describe('portal', () => {
     },
   )
 
+  it('shows the latest failure and remediation even if operation history is unavailable', async () => {
+    window.history.replaceState(null, '', `/#environment/${demoEnvironment.id}`)
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => url.includes('/operations?')
+      ? json({ message: 'History unavailable.' }, 503)
+      : json({ ...demoEnvironment, status: 'DELETE_FAILED',
+        latestOperation: { ...demoEnvironment.latestOperation, type: 'DELETE_ENVIRONMENT', status: 'FAILED',
+          failureCode: 'KUBERNETES_FORBIDDEN', failureMessage: 'Kubernetes access was denied.' } })))
+    render(<App />)
+    expect(await screen.findByText('Kubernetes access was denied.')).toBeTruthy()
+    expect(screen.getByText(/Role\/ClusterRole and bindings/)).toBeTruthy()
+    expect(await screen.findByText('History unavailable.')).toBeTruthy()
+  })
+
   it('shows errors and request IDs, then recovers on retry', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(json({
       message: 'The request could not be completed.', requestId: 'request-123',
