@@ -9,6 +9,8 @@ beforeEach(() => window.history.replaceState(null, '', '/'))
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+  window.sessionStorage.clear()
 })
 
 function mockPortal(operation = demoOperation) {
@@ -21,7 +23,29 @@ function mockPortal(operation = demoOperation) {
   return fetchMock
 }
 
-describe('read-only portal', () => {
+function createdPortal(postResponse: () => Promise<Response>) {
+  const createdEnvironment = { ...demoEnvironment, name: 'Interview Env', status: 'REQUESTED',
+    latestOperation: { ...demoEnvironment.latestOperation!, status: 'PENDING', progressStep: 'ACCEPTED' } }
+  const createdOperation = { ...demoOperation, status: 'PENDING', progressStep: 'ACCEPTED', events: [] }
+  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+    if (init?.method === 'POST') return postResponse()
+    if (url.includes(`/environments/${demoEnvironment.id}/operations?`)) return json(paged([createdOperation]))
+    if (url.includes(`/environments/${demoEnvironment.id}`)) return json(createdEnvironment)
+    if (url.includes('/operations?')) return json(paged([]))
+    return json(paged([]))
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+function stubCreationKey(...keys: string[]) {
+  const randomUUID = vi.fn()
+  for (const key of keys) randomUUID.mockReturnValueOnce(key)
+  vi.stubGlobal('crypto', { randomUUID })
+  return randomUUID
+}
+
+describe('portal', () => {
   it('shows loading and a useful empty state without write actions', async () => {
     let resolve!: (response: Response) => void
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((done) => { resolve = done })))
@@ -29,9 +53,266 @@ describe('read-only portal', () => {
     expect(screen.getByRole('status').textContent).toBe('Loading…')
     await act(async () => resolve(json(paged([]))))
     expect(screen.getByRole('heading', { name: 'No environments yet' })).toBeTruthy()
-    expect(screen.getByText('POST /api/v1/environments')).toBeTruthy()
+    expect(screen.getAllByRole('link', { name: 'Create environment' })).toHaveLength(2)
     expect(screen.queryByRole('region', { name: 'Status summary for this page' })).toBeNull()
     expect(screen.queryByRole('button', { name: /create|delete/i })).toBeNull()
+  })
+
+  describe('environment creation', () => {
+    beforeEach(() => stubCreationKey('create-key-1', 'create-key-2'))
+
+    it('offers an accessible form with approved template, default lifetime, and safety guidance', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(paged([]))))
+      render(<App />)
+      await userEvent.click(screen.getByRole('link', { name: 'Create environment' }))
+      expect(screen.getByRole('heading', { name: 'Create environment' })).toBeTruthy()
+      expect(screen.getByLabelText('Environment name')).toBeTruthy()
+      expect(screen.getByLabelText('Approved template')).toBeTruthy()
+      expect(screen.getByLabelText('Lifetime (hours)')).toHaveProperty('value', '8')
+      expect(screen.getByText(/does not mean the environment is ready/)).toBeTruthy()
+      expect(screen.getByText(/not automatically deleted/)).toBeTruthy()
+    })
+
+    it('trims and submits a valid request with the backend defaults and navigates to persisted history', async () => {
+      const fetchMock = createdPortal(async () => json({
+        environmentId: demoEnvironment.id, operationId: demoOperation.id,
+        environmentStatus: 'REQUESTED', operationStatus: 'PENDING',
+      }, 202))
+      render(<App />)
+      await userEvent.click(screen.getByRole('link', { name: 'Create environment' }))
+      await userEvent.type(screen.getByLabelText('Environment name'), '  Interview Env  ')
+      await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+      expect(await screen.findByRole('heading', { name: 'Operation history' })).toBeTruthy()
+      expect(window.location.hash).toBe(`#environment/${demoEnvironment.id}`)
+      const post = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')
+      expect(post).toBeDefined()
+      const request = post?.[1]
+      if (!request) throw new Error('Expected a creation request.')
+      expect(JSON.parse(request.body as string)).toEqual({
+        name: 'Interview Env', templateId: 'sample-service', ttlHours: 8,
+      })
+      expect((request.headers as Record<string, string>)['Idempotency-Key']).toBe('create-key-1')
+      expect(screen.getByText('REQUESTED')).toBeTruthy()
+      expect(screen.getAllByText('PENDING')).toHaveLength(2)
+    })
+
+    it.each([
+      ['name', '  ', 'Enter an environment name.'],
+      ['name', '-starts-wrong', /start with a letter or digit/],
+      ['name', 'éclair', /ASCII letters/],
+      ['name', 'a'.repeat(64), /1–63/],
+      ['ttl', '0', /whole number from 1 to 24/],
+      ['ttl', '25', /whole number from 1 to 24/],
+      ['ttl', '1.5', /whole number from 1 to 24/],
+    ])('validates invalid %s input %s before posting', async (field, value, error) => {
+      const fetchMock = vi.fn().mockResolvedValue(json(paged([])))
+      vi.stubGlobal('fetch', fetchMock)
+      window.history.replaceState(null, '', '/#create')
+      render(<App />)
+      const input = field === 'name' ? screen.getByLabelText('Environment name') : screen.getByLabelText('Lifetime (hours)')
+      await userEvent.clear(input)
+      await userEvent.type(input, value)
+      await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+      expect(await screen.findByText(error, { selector: '.field-error' })).toBeTruthy()
+      expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+      expect(input.getAttribute('aria-invalid')).toBe('true')
+    })
+
+    it.each(['1', '24'])('accepts lifetime boundary %s', async (value) => {
+      const fetchMock = createdPortal(async () => json({
+        environmentId: demoEnvironment.id, operationId: demoOperation.id,
+        environmentStatus: 'REQUESTED', operationStatus: 'PENDING',
+      }, 202))
+      window.history.replaceState(null, '', '/#create')
+      render(<App />)
+      const lifetime = screen.getByLabelText('Lifetime (hours)')
+      await userEvent.clear(lifetime)
+      await userEvent.type(lifetime, value)
+      await userEvent.type(screen.getByLabelText('Environment name'), 'Boundary')
+      await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+      await screen.findByRole('heading', { name: 'Operation history' })
+      const post = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')
+      expect(post).toBeDefined()
+      const request = post?.[1]
+      if (!request) throw new Error('Expected a creation request.')
+      expect(JSON.parse(request.body as string).ttlHours).toBe(Number(value))
+    })
+
+    it('shows server field errors and correlation IDs while preserving editable values', async () => {
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => init?.method === 'POST'
+        ? json({
+          code: 'VALIDATION_ERROR', message: 'Request validation failed.', requestId: 'validation-123',
+          fieldErrors: [{ field: 'name', message: 'must be unique' }],
+        }, 400)
+        : json(paged([])))
+      vi.stubGlobal('fetch', fetchMock)
+      window.history.replaceState(null, '', '/#create')
+      render(<App />)
+      const name = screen.getByLabelText('Environment name')
+      await userEvent.type(name, 'My environment')
+      await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+      expect(await screen.findByText('must be unique')).toBeTruthy()
+      expect(screen.getByRole('status').textContent).toContain('validation-123')
+      expect(name).toHaveProperty('value', 'My environment')
+      expect(name.hasAttribute('disabled')).toBe(false)
+    })
+
+    it('prevents rapid double submit and replays the exact pending intent after remount', async () => {
+      let rejectFirst!: (error: Error) => void
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.method === 'POST') {
+          if (fetchMock.mock.calls.filter(([, request]) => request?.method === 'POST').length === 1) {
+            return new Promise<Response>((_resolve, reject) => { rejectFirst = reject })
+          }
+          return json({
+            environmentId: demoEnvironment.id, operationId: demoOperation.id,
+            environmentStatus: 'REQUESTED', operationStatus: 'PENDING',
+          }, 202)
+        }
+        if (_url.includes(`/environments/${demoEnvironment.id}/operations?`)) return json(paged([demoOperation]))
+        if (_url.includes(`/environments/${demoEnvironment.id}`)) return json(demoEnvironment)
+        return json(paged([]))
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      window.history.replaceState(null, '', '/#create')
+      const { unmount } = render(<App />)
+      await userEvent.type(screen.getByLabelText('Environment name'), 'Safe retry')
+      const submit = screen.getByRole('button', { name: 'Create environment' })
+      fireEvent.click(submit)
+      fireEvent.click(submit)
+      await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1))
+      const firstPost = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')
+      expect(firstPost).toBeDefined()
+      const firstRequest = firstPost?.[1]
+      await act(async () => rejectFirst(new TypeError('connection lost')))
+      expect(await screen.findByRole('button', { name: 'Retry the same request' })).toBeTruthy()
+      unmount()
+      render(<App />)
+      expect(screen.getByLabelText('Environment name')).toHaveProperty('value', 'Safe retry')
+      await userEvent.click(screen.getByRole('button', { name: 'Retry the same request' }))
+      await screen.findByRole('heading', { name: 'Operation history' })
+      const posts = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')
+      expect(posts).toHaveLength(2)
+      const retriedRequest = posts[1]?.[1]
+      if (!firstRequest || !retriedRequest) throw new Error('Expected two creation requests.')
+      expect(retriedRequest.body).toBe(firstRequest.body)
+      expect((retriedRequest.headers as Record<string, string>)['Idempotency-Key'])
+        .toBe((firstRequest.headers as Record<string, string>)['Idempotency-Key'])
+      expect(retriedRequest.headers).toEqual(firstRequest.headers)
+    })
+
+    it('requires explicit confirmation before replacing an uncertain intent with a fresh key', async () => {
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => init?.method === 'POST'
+        ? json({ code: 'INTERNAL_ERROR', requestId: 'server-500' }, 500)
+        : json(paged([])))
+      vi.stubGlobal('fetch', fetchMock)
+      window.history.replaceState(null, '', '/#create')
+      render(<App />)
+      await userEvent.type(screen.getByLabelText('Environment name'), 'Maybe exists')
+      await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+      expect(await screen.findByRole('button', { name: 'Retry the same request' })).toBeTruthy()
+      await userEvent.click(screen.getByRole('button', { name: 'Start a new request instead' }))
+      expect(screen.getByText(/The earlier request may already exist/).textContent).toContain('does not cancel it')
+      await userEvent.click(screen.getByRole('button', { name: 'I understand — start a new request' }))
+      expect(screen.getByRole('status').textContent).toContain('may already have created')
+      expect(screen.getByLabelText('Environment name')).toHaveProperty('value', 'Maybe exists')
+      await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+      await screen.findByRole('button', { name: 'Retry the same request' })
+      const posts = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')
+      expect(posts).toHaveLength(2)
+      const firstRequest = posts[0]?.[1]
+      const secondRequest = posts[1]?.[1]
+      if (!firstRequest || !secondRequest) throw new Error('Expected two creation requests.')
+      expect((firstRequest.headers as Record<string, string>)['Idempotency-Key']).toBe('create-key-1')
+      expect((secondRequest.headers as Record<string, string>)['Idempotency-Key']).toBe('create-key-2')
+    })
+
+    it('supports keyboard submission and reports an idempotency conflict without retrying that key', async () => {
+      let posts = 0
+      const fetchMock = createdPortal(async () => {
+        posts += 1
+        return posts === 1
+          ? json({ code: 'IDEMPOTENCY_CONFLICT', requestId: 'conflict-123' }, 409)
+          : json({
+            environmentId: demoEnvironment.id, operationId: demoOperation.id,
+            environmentStatus: 'REQUESTED', operationStatus: 'PENDING',
+          }, 202)
+      })
+      window.history.replaceState(null, '', '/#create')
+      render(<App />)
+      await userEvent.type(screen.getByLabelText('Environment name'), 'Keyboard request')
+      await userEvent.keyboard('{Enter}')
+      expect(await screen.findByText(/request key belongs to a different request/)).toBeTruthy()
+      expect(screen.getByRole('alert').textContent).toContain('conflict-123')
+      expect(screen.queryByRole('button', { name: 'Retry the same request' })).toBeNull()
+      await userEvent.click(screen.getByRole('button', { name: 'Start a new request instead' }))
+      await userEvent.click(screen.getByRole('button', { name: 'I understand — start a new request' }))
+      await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+      await screen.findByRole('heading', { name: 'Operation history' })
+      const requests = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')
+      expect(requests).toHaveLength(2)
+      const firstRequest = requests[0]?.[1]
+      const secondRequest = requests[1]?.[1]
+      if (!firstRequest || !secondRequest) throw new Error('Expected two creation requests.')
+      expect((firstRequest.headers as Record<string, string>)['Idempotency-Key']).toBe('create-key-1')
+      expect((secondRequest.headers as Record<string, string>)['Idempotency-Key']).toBe('create-key-2')
+    })
+
+    it('keeps same-key retry available when browser session storage is blocked', async () => {
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new DOMException('blocked', 'SecurityError')
+      })
+      let posts = 0
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.method === 'POST') {
+          posts += 1
+          return posts === 1 ? Promise.reject(new TypeError('connection lost')) : json({
+            environmentId: demoEnvironment.id, operationId: demoOperation.id,
+            environmentStatus: 'REQUESTED', operationStatus: 'PENDING',
+          }, 202)
+        }
+        if (_url.includes(`/environments/${demoEnvironment.id}/operations?`)) return json(paged([demoOperation]))
+        if (_url.includes(`/environments/${demoEnvironment.id}`)) return json(demoEnvironment)
+        return json(paged([]))
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      window.history.replaceState(null, '', '/#create')
+      render(<App />)
+      await userEvent.type(screen.getByLabelText('Environment name'), 'Storage unavailable')
+      await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+      expect(await screen.findByText(/could not save the retry intent/)).toBeTruthy()
+      await userEvent.click(screen.getByRole('button', { name: 'Retry the same request' }))
+      await screen.findByRole('heading', { name: 'Operation history' })
+      const requests = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')
+      expect(requests).toHaveLength(2)
+      const firstRequest = requests[0]?.[1]
+      const secondRequest = requests[1]?.[1]
+      if (!firstRequest || !secondRequest) throw new Error('Expected two creation requests.')
+      expect(secondRequest.body).toBe(firstRequest.body)
+      expect((firstRequest.headers as Record<string, string>)['Idempotency-Key'])
+        .toBe((secondRequest.headers as Record<string, string>)['Idempotency-Key'])
+    })
+
+    it('does not navigate away from a newer route when a submission completes late', async () => {
+      let resolvePost!: (response: Response) => void
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => init?.method === 'POST'
+        ? new Promise<Response>((resolve) => { resolvePost = resolve })
+        : json(paged([])))
+      vi.stubGlobal('fetch', fetchMock)
+      window.history.replaceState(null, '', '/#create')
+      render(<App />)
+      await userEvent.type(screen.getByLabelText('Environment name'), 'Late response')
+      fireEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+      await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(true))
+      window.location.hash = '#environments'
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Environments' })).toBeTruthy())
+      await act(async () => resolvePost(json({
+        environmentId: demoEnvironment.id, operationId: demoOperation.id,
+        environmentStatus: 'REQUESTED', operationStatus: 'PENDING',
+      }, 202)))
+      expect(window.location.hash).toBe('#environments')
+      expect(screen.queryByRole('heading', { name: 'Operation history' })).toBeNull()
+    })
   })
 
   it('summarizes only the loaded page, not the inventory total', async () => {

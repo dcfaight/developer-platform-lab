@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, environment, environmentPage, operationPage, read } from './client'
+import { ApiError, createEnvironment, environment, environmentPage, operationPage, read } from './client'
 import { demoEnvironment, demoOperation, json, paged } from '../test/fixtures'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -62,5 +62,68 @@ describe('read-only API boundary', () => {
   it('rejects invalid JSON', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('not JSON')))
     await expect(read('/environments', environmentPage)).rejects.toThrow('unexpected response')
+  })
+
+  it('posts a typed request to the same-origin API with its stable idempotency key', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(json({
+      environmentId: demoEnvironment.id, operationId: demoOperation.id,
+      environmentStatus: 'REQUESTED', operationStatus: 'PENDING',
+    }, 202))
+    vi.stubGlobal('fetch', fetchMock)
+    const payload = { name: 'demo', templateId: 'sample-service' as const, ttlHours: 8 }
+    expect(await createEnvironment(payload, 'request-key-123')).toEqual({
+      environmentId: demoEnvironment.id, operationId: demoOperation.id,
+      environmentStatus: 'REQUESTED', operationStatus: 'PENDING',
+    })
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/environments', expect.objectContaining({
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'request-key-123',
+      },
+      body: JSON.stringify(payload),
+    }))
+  })
+
+  it('returns structured field validation errors without trusting response messages', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({
+      code: 'VALIDATION_ERROR', message: '<script>internal</script>', requestId: 'request-123',
+      fieldErrors: [{ field: 'name', message: 'must start with a letter or digit' }, { field: 'internal', message: 'secret' }],
+    }, 400)))
+    await expect(createEnvironment({ name: '', templateId: 'sample-service', ttlHours: 8 }, 'request-key-123'))
+      .rejects.toMatchObject({
+        message: 'Some fields need attention.', requestId: 'request-123', code: 'VALIDATION_ERROR',
+        fieldErrors: [{ field: 'name', message: 'must start with a letter or digit' }],
+        outcomeUncertain: false,
+      })
+  })
+
+  it('sanitizes server errors and marks uncertain outcomes for same-key retry', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({
+      code: 'INTERNAL_ERROR', message: 'database password leaked', requestId: 'request-500',
+    }, 500)))
+    await expect(createEnvironment({ name: 'demo', templateId: 'sample-service', ttlHours: 8 }, 'request-key-123'))
+      .rejects.toMatchObject({
+        message: expect.stringContaining('may have been accepted'),
+        requestId: 'request-500', outcomeUncertain: true,
+      })
+    await expect(createEnvironment({ name: 'demo', templateId: 'sample-service', ttlHours: 8 }, 'request-key-123'))
+      .rejects.not.toThrow('database password leaked')
+  })
+
+  it('treats malformed acceptance and idempotency conflict as recoverable-key outcomes', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json({ environmentId: 'not-a-uuid' }, 202))
+      .mockResolvedValueOnce(json({
+        code: 'IDEMPOTENCY_CONFLICT', message: 'untrusted message', requestId: 'request-conflict',
+      }, 409)))
+    const payload = { name: 'demo', templateId: 'sample-service' as const, ttlHours: 8 }
+    await expect(createEnvironment(payload, 'same-key')).rejects.toMatchObject({
+      message: 'The API returned an unexpected creation response.', outcomeUncertain: true,
+    })
+    await expect(createEnvironment(payload, 'same-key')).rejects.toMatchObject({
+      message: expect.stringContaining('earlier request may already exist'),
+      requestId: 'request-conflict', code: 'IDEMPOTENCY_CONFLICT',
+    })
   })
 })

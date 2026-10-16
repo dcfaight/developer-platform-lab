@@ -30,8 +30,8 @@ export function EnvironmentList({ page, onPageChange }: {
         ? <div className="empty"><h3>{data.totalElements ? 'No environments on this page' : 'No environments yet'}</h3>
           {data.totalElements
             ? <p>Use Previous to return to earlier results.</p>
-            : <><p>Start with <code>POST /api/v1/environments</code> using the local demo guide in <code>docs/demo.md</code>.</p>
-              <p>This portal is read-only. Enable the backend worker and local kind cluster to see provisioning progress.</p></>}</div>
+            : <><p>Use the <a href="#create">Create environment</a> form to request the approved local sample.</p>
+              <p>Acceptance is not readiness. Enable the backend worker and local kind cluster to see provisioning progress.</p></>}</div>
         : <div className="table-scroll"><table>
           <caption className="sr-only">Environments and their latest operation status</caption>
           <thead><tr><th scope="col">Environment</th><th scope="col">Status</th><th scope="col">Template / namespace</th>

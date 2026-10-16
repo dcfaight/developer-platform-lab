@@ -2,7 +2,7 @@
 
 A hands-on internal developer platform for provisioning development environments, deploying a sample application, and understanding operational status through a self-service portal.
 
-> **Project status:** Persistent requests now support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. A read-only React portal lists environments and displays details, operation history, progress, and sanitized failures. Portal creation/deletion controls, expiration cleanup, authentication, and production readiness are not implemented.
+> **Project status:** Persistent requests now support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal can request the approved sample and lists environments with details, operation history, progress, and sanitized failures. Deletion, expiration cleanup, authentication, and production readiness are not implemented.
 >
 > Except where marked as available now, this README preserves the intended architecture and delivery blueprint, not a claim that the full platform is implemented.
 >
@@ -12,9 +12,9 @@ A hands-on internal developer platform for provisioning development environments
 
 | Implemented now | Future work, not demo claims |
 |---|---|
-| Validated, idempotent environment requests persisted in PostgreSQL | Portal create/delete controls and a deletion workflow |
+| Portal creation for the approved sample; requests are validated and idempotently persisted in PostgreSQL | Deletion workflow |
 | Opt-in leased worker provisioning an approved sample in local kind | Expiration cleanup and continuous post-provisioning health monitoring |
-| Read-only portal with page-local status counts, details, and durable operation timelines | Authentication, production RBAC, and multi-user hardening |
+| Portal with page-local status counts, creation, details, and durable operation timelines | Authentication, production RBAC, and multi-user hardening |
 | Loading/error/retry states, sanitized failures, and request correlation | Custom templates/images, Services, and ingress |
 
 **Start here:** [local demo and troubleshooting runbook](docs/demo.md) for the
@@ -63,9 +63,9 @@ These boundaries keep the first version achievable and its security assumptions 
 
 ## 3. Primary User Journey
 
-### Create an environment (target journey)
+### Create an environment (available journey)
 
-Today, creation is through the API; the portal provides read-only status views.
+The portal submits creation requests through the existing API; it does not access Kubernetes directly.
 
 1. The developer opens the portal.
 2. They enter an environment name and choose an allowed lifetime.
@@ -240,7 +240,7 @@ This is a planned structure. Directories will be introduced as their functionali
 
 The directories above now have starter files or explicit placeholders.
 The backend base package is `io.github.dcfaight.platformlab`.
-The frontend provides a read-only environment inventory and operation status portal. The backend requires PostgreSQL and
+The frontend provides an environment creation and status portal. The backend requires PostgreSQL and
 implements persistent environment creation requests and environment/operation
 reads, with Flyway migrations and durable idempotency. An opt-in worker provisions
 an approved sample workload only in the dedicated local kind cluster. Cleanup
@@ -409,8 +409,8 @@ The initial demo accesses the sample application through a documented local port
 
 ## 12. Frontend Experience
 
-The list and read-only detail experience are available now. Creation and deletion
-controls below remain part of the intended blueprint, not the current portal.
+The list, creation form, and detail/history experience are available now. Deletion
+controls remain part of the intended blueprint, not the current portal.
 
 ### Environment list
 
@@ -419,12 +419,11 @@ controls below remain part of the intended blueprint, not the current portal.
 - Refresh behavior.
 - Empty, loading, and error states.
 
-### Create environment form (planned)
+### Create environment form
 
-- Validated environment name.
-- Supported template.
-- Allowed lifetime.
-- Clear submission feedback.
+- Validates the trimmed name and 1–24-hour lifetime; only the approved `sample-service` template is selectable.
+- Reuses a tab-scoped idempotency key and exact payload after an ambiguous result; starting a different request is explicit and warns the original may exist.
+- Distinguishes acceptance from readiness and explains that lifetime metadata does not trigger cleanup.
 
 ### Environment detail
 
@@ -458,7 +457,7 @@ Follow the executable [local demo guide](docs/demo.md):
 1. Install Java 17, Node.js 24/npm 11, Docker with Compose, kind, kubectl, curl, and jq.
 2. Configure the ignored `.env`, start PostgreSQL, and export the backend `DB_*` variables.
 3. Create the dedicated kind cluster and enable the worker in the host-run backend.
-4. Start the Vite frontend and submit a request through the API.
+4. Start the Vite frontend and submit a request through the portal.
 5. Replay safely and observe the operation in the API and portal.
 
 The worker uses a fixed sample image; no custom application build/load is required.
@@ -507,19 +506,21 @@ npm ci
 npm run dev
 ```
 
-The read-only portal is at http://localhost:5173. Vite proxies `/api` to the
+The portal is at http://localhost:5173. Use **Create environment** to request the
+approved sample, or use the curl examples below to exercise API replay. Vite proxies `/api` to the
 local backend, so no CORS configuration is needed. It lists environment status,
 template, namespace, created/expires timestamps, and latest/active operation.
 Select an environment to see its details, paginated operation history, recorded
 progress steps/events, attempt count, lifecycle timestamps, request correlation,
 and sanitized failure summaries. Views refresh every 10 seconds or on demand;
 failed refreshes explicitly retain the last loaded data. Times use the browser's
-local timezone. There are no portal create/delete actions or authentication.
+local timezone. There is no deletion or authentication.
 
-For a demo, create a request using the curl examples linked below, then refresh
-the portal. With the worker disabled, it honestly shows `REQUESTED` / `PENDING`;
+With the worker disabled, the portal honestly shows `REQUESTED` / `PENDING`;
 enable the optional local-kind worker to observe provisioning and readiness.
-Expiry timestamps do not trigger cleanup. This remains a work-in-progress
+Expiry timestamps do not trigger cleanup. Ambiguous browser submissions can be
+retried with their stored key and payload in the same tab session; this does not
+cancel server work. This remains a work-in-progress
 portfolio blueprint, not production software. See [frontend/README.md](frontend/README.md)
 for navigation, testing, and deployment limitations.
 The backend listens on http://127.0.0.1:8080 and applies Flyway migrations on

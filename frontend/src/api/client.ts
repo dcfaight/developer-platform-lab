@@ -48,13 +48,38 @@ export interface Page<T> {
   totalPages: number
 }
 
+export interface CreateEnvironmentRequest {
+  name: string
+  templateId: 'sample-service'
+  ttlHours: number
+}
+
+export interface AcceptedEnvironment {
+  environmentId: string
+  operationId: string
+  environmentStatus: 'REQUESTED'
+  operationStatus: 'PENDING'
+}
+
+export interface ApiFieldError {
+  field: string
+  message: string
+}
+
 export class ApiError extends Error {
   readonly requestId?: string
+  readonly code?: string
+  readonly fieldErrors: ApiFieldError[]
+  readonly outcomeUncertain: boolean
 
-  constructor(message: string, requestId?: string) {
+  constructor(message: string, requestId?: string, code?: string,
+    fieldErrors: ApiFieldError[] = [], outcomeUncertain = false) {
     super(message)
     this.name = 'ApiError'
     this.requestId = requestId
+    this.code = code
+    this.fieldErrors = fieldErrors
+    this.outcomeUncertain = outcomeUncertain
   }
 }
 
@@ -158,4 +183,115 @@ export async function read<T>(path: string, decode: Decoder<T>, signal?: AbortSi
     throw new ApiError('The API returned an unexpected response.')
   }
   return decode(body)
+}
+
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i
+const ALLOWED_FIELDS = new Set(['name', 'templateId', 'ttlHours'])
+const CREATION_TIMEOUT_MS = 15_000
+
+function fieldErrors(value: unknown): ApiFieldError[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const field = (item as JsonObject).field
+    const message = (item as JsonObject).message
+    if (typeof field !== 'string' || !ALLOWED_FIELDS.has(field) || typeof message !== 'string') return []
+    return [{ field, message: message.slice(0, 250) }]
+  })
+}
+
+function requestIdentifier(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value) ? value : undefined
+}
+
+function acceptedEnvironment(value: unknown): AcceptedEnvironment {
+  const item = object(value)
+  if (typeof item.environmentId !== 'string' || !UUID.test(item.environmentId)
+    || typeof item.operationId !== 'string' || !UUID.test(item.operationId)
+    || item.environmentStatus !== 'REQUESTED' || item.operationStatus !== 'PENDING') {
+    throw new ApiError('The API returned an unexpected creation response.')
+  }
+  return {
+    environmentId: item.environmentId,
+    operationId: item.operationId,
+    environmentStatus: 'REQUESTED',
+    operationStatus: 'PENDING',
+  }
+}
+
+export async function createEnvironment(
+  request: CreateEnvironmentRequest,
+  idempotencyKey: string,
+): Promise<AcceptedEnvironment> {
+  const controller = new AbortController()
+  let timedOut = false
+  const timeout = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, CREATION_TIMEOUT_MS)
+
+  try {
+    let response: Response
+    try {
+      response = await fetch('/api/v1/environments', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify(request),
+      })
+    } catch {
+      throw new ApiError(timedOut
+        ? 'The request timed out. The environment may have been accepted; retry the same request safely.'
+        : 'The connection was interrupted. The environment may have been accepted; retry the same request safely.',
+      undefined, undefined, [], true)
+    }
+
+    const headerRequestId = requestIdentifier(response.headers.get('X-Request-Id'))
+    if (!response.ok) {
+      let body: JsonObject = {}
+      try {
+        body = object(await response.json())
+      } catch {
+        // Do not expose proxy or server diagnostic bodies.
+      }
+      const code = typeof body.code === 'string' ? body.code : undefined
+      const requestId = requestIdentifier(body.requestId) ?? headerRequestId
+      const errors = fieldErrors(body.fieldErrors)
+      if (response.status === 400 && code === 'VALIDATION_ERROR') {
+        throw new ApiError('Some fields need attention.', requestId, code, errors)
+      }
+      if (response.status === 409 && code === 'IDEMPOTENCY_CONFLICT') {
+        throw new ApiError('This request key belongs to a different request. The earlier request may already exist.',
+          requestId, code)
+      }
+      throw new ApiError(response.status >= 500
+        ? 'The server could not confirm the result. The environment may have been accepted; retry the same request safely.'
+        : `The request was rejected (HTTP ${response.status}).`,
+      requestId, code, [], response.status >= 500)
+    }
+
+    if (response.status !== 202) {
+      throw new ApiError('The API returned an unexpected creation response.',
+        headerRequestId, undefined, [], true)
+    }
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch {
+      throw new ApiError('The API returned an unexpected creation response.',
+        headerRequestId, undefined, [], true)
+    }
+    try {
+      return acceptedEnvironment(body)
+    } catch {
+      throw new ApiError('The API returned an unexpected creation response.',
+        headerRequestId, undefined, [], true)
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
 }
