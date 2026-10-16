@@ -345,7 +345,7 @@ class CleanupTests(unittest.TestCase):
             "9999-12-31T23:59:59.999999999Z",
         ):
             with self.subTest(expires=expires):
-                client = FakeClient([page([item(expires=expires)])])
+                client = FakeClient([page([item(expires=expires)]), item()], [accepted()])
                 result = self.run_cleanup(client, "--execute")
                 self.assertEqual(self.codes(result), ["INVALID_TIMESTAMP"])
                 self.assertEqual(result["selectedIds"], [])
@@ -484,12 +484,15 @@ class CleanupTests(unittest.TestCase):
         good = accepted()
         for response in (
             None, [], {}, {**good, "environmentId": OTHER},
+            {**good, "environmentId": []},
             {**good, "environmentStatus": "DELETED"},
+            {**good, "environmentStatus": []},
             {**good, "operationStatus": "SUCCEEDED"},
             {**good, "operationStatus": []},
             {**good, "operationStatus": {}},
             {**good, "operationId": "not-a-uuid"},
             {**good, "operationId": OPERATION.upper()},
+            {**good, "operationId": []},
         ):
             with self.subTest(response=response):
                 client = FakeClient(
@@ -503,7 +506,7 @@ class CleanupTests(unittest.TestCase):
                 self.assertEqual(sum(call[0] == "DELETE" for call in client.calls), 1)
 
     def test_uncommitted_delete_failure_stays_failed_and_never_retries(self):
-        for status, code in ((404, "NOT_FOUND"), (409, "CONFLICT"), (500, "INTERNAL")):
+        for status, code in ((404, "NOT_FOUND"), (409, "CONFLICT")):
             with self.subTest(status=status):
                 client = FakeClient(
                     [page([item()]), item(), item()],
@@ -517,6 +520,27 @@ class CleanupTests(unittest.TestCase):
                     "code": code, "httpStatus": status,
                     "requestId": "request-123", "environmentId": IDENTITY,
                 }])
+                self.assertEqual(sum(call[0] == "DELETE" for call in client.calls), 1)
+
+    def test_ambiguous_delete_with_unchanged_recovery_is_unknown_not_retried(self):
+        for failure in (
+            cleanup.Failure("TRANSPORT_ERROR"),
+            cleanup.Failure("INVALID_ACCEPTANCE"),
+            cleanup.Failure("INVALID_JSON", 202),
+            cleanup.Failure("HTTP_ERROR", 408),
+            cleanup.Failure("HTTP_ERROR", 500),
+            cleanup.Failure("HTTP_ERROR", 503),
+        ):
+            with self.subTest(code=failure.code, status=failure.status):
+                client = FakeClient(
+                    [page([item()]), item(), item()], [failure]
+                )
+                result = self.run_cleanup(client, "--execute")
+                self.assertEqual(result["unknown"], 1)
+                self.assertEqual(result["failed"], 0)
+                self.assertEqual(result["exitStatus"], 1)
+                self.assertEqual(result["acceptedOperations"], [])
+                self.assertEqual(result["errors"][0]["environmentId"], IDENTITY)
                 self.assertEqual(sum(call[0] == "DELETE" for call in client.calls), 1)
 
     def test_terminal_delete_failed_is_not_retried_even_after_ambiguous_delete(self):
@@ -539,6 +563,8 @@ class CleanupTests(unittest.TestCase):
             cleanup.Failure("TRANSPORT_ERROR"),
             item(OTHER, "DELETING"),
             item(state="DELETING"),
+            item(state="DELETING", latestOperation=[]),
+            item(state="DELETING", latestOperation=None),
             recovering(operation="bad"),
             recovering(type="CREATE_ENVIRONMENT"),
             recovering(status="SUCCEEDED"),
@@ -580,6 +606,7 @@ class ArgumentTests(unittest.TestCase):
             ["--api-base-url", value] for value in (
                 "https://example.com/api/v1", "http://0.0.0.0/api/v1",
                 "http://192.168.1.2/api/v1", "http://[::]/api/v1",
+                "http://[::1%25lo]/api/v1",
                 "http://localhost.example.com/api/v1",
                 "http://user@127.0.0.1/api/v1",
                 "http://:password@127.0.0.1/api/v1",
@@ -970,7 +997,7 @@ class HttpCliTests(unittest.TestCase):
             return 200, item(state="DELETE_FAILED"), {}
 
         with http_server(responder) as (url, requests):
-            result = self.summary(self.cli(url, "--execute"))
+            result = self.summary(self.cli(url, "--execute"), 1)
         self.assertEqual(result["failed"], 1)
         self.assertEqual(result["acceptedOperations"], [])
         self.assertEqual(sum(method == "DELETE" for method, _, _ in requests), 1)
@@ -982,7 +1009,7 @@ class HttpCliTests(unittest.TestCase):
             return 404, {"code": "NOT_FOUND", "message": SECRET}, {}
 
         with http_server(responder) as (url, requests):
-            result = self.summary(self.cli(url, "--execute"))
+            result = self.summary(self.cli(url, "--execute"), 1)
         self.assertEqual(result["errors"], [{
             "code": "NOT_FOUND", "httpStatus": 404, "environmentId": IDENTITY,
         }])
@@ -1017,6 +1044,73 @@ class HttpCliTests(unittest.TestCase):
                     result = self.summary(self.cli(url), 1)
                 self.assertEqual(result["errors"], [expected])
                 self.assertEqual(len(requests), 1)
+
+    def test_duplicate_page_and_nested_environment_fields_fail_closed(self):
+        clean = json.dumps(page([item(expires="2000-01-01T00:00:00Z")]))
+        for body in (
+            clean[:-1] + ', "page": 0}',
+            clean.replace('"status": "READY"', '"status": "READY", "status": "FAILED"'),
+            clean.replace(
+                '"expiresAt": "2000-01-01T00:00:00Z"',
+                '"expiresAt": "2099-01-01T00:00:00Z", "expiresAt": "2000-01-01T00:00:00Z"',
+            ),
+        ):
+            with self.subTest(body=body):
+                with http_server(lambda handler, n: (
+                    200, body.encode(), {}
+                )) as (url, requests):
+                    result = self.summary(self.cli(url, "--execute"), 1)
+                self.assertEqual(result["errors"], [{"code": "INVALID_JSON", "httpStatus": 200}])
+                self.assertFalse(result["scanComplete"])
+                self.assertEqual(result["selectedIds"], [])
+                self.assertEqual(len(requests), 1)
+
+    def test_duplicate_acceptance_fields_trigger_recovery_without_repeated_delete(self):
+        body = (json.dumps(accepted())[:-1] + ', "operationId": "' + OTHER + '"}').encode()
+
+        def responder(handler, number):
+            if number == 1:
+                return 200, page([item(expires="2000-01-01T00:00:00Z")]), {}
+            if number == 2:
+                return 200, item(expires="2000-01-01T00:00:00Z"), {}
+            if handler.command == "DELETE":
+                return 202, body, {}
+            return 200, recovering(), {}
+
+        with http_server(responder) as (url, requests):
+            result = self.summary(self.cli(url, "--execute"))
+        self.assertEqual(result["alreadyDeleting"], 1)
+        self.assertEqual(result["requested"], 0)
+        self.assertEqual(result["acceptedOperations"], [{
+            "environmentId": IDENTITY, "operationId": OPERATION,
+            "source": "recovery", "observedStatus": "DELETING",
+        }])
+        self.assertEqual(sum(method == "DELETE" for method, _, _ in requests), 1)
+
+    def test_duplicate_recovery_operation_fields_leave_outcome_unknown(self):
+        body = json.dumps(recovering()).replace(
+            '"type": "DELETE_ENVIRONMENT"',
+            '"type": "CREATE_ENVIRONMENT", "type": "DELETE_ENVIRONMENT"',
+        ).encode()
+
+        def responder(handler, number):
+            if number == 1:
+                return 200, page([item(expires="2000-01-01T00:00:00Z")]), {}
+            if number == 2:
+                return 200, item(expires="2000-01-01T00:00:00Z"), {}
+            if handler.command == "DELETE":
+                return 503, {"code": "UNAVAILABLE"}, {}
+            return 200, body, {}
+
+        with http_server(responder) as (url, requests):
+            result = self.summary(self.cli(url, "--execute"), 1)
+        self.assertEqual(result["unknown"], 1)
+        self.assertEqual(result["acceptedOperations"], [])
+        self.assertEqual(result["errors"], [
+            {"code": "UNAVAILABLE", "httpStatus": 503, "environmentId": IDENTITY},
+            {"code": "INVALID_JSON", "httpStatus": 200, "environmentId": IDENTITY},
+        ])
+        self.assertEqual([method for method, _, _ in requests], ["GET", "GET", "DELETE", "GET"])
 
     def test_untrusted_json_types_are_reported_without_traceback(self):
         for value, code in (

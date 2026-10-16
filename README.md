@@ -340,8 +340,9 @@ Currently implemented: `POST /environments`, `GET /environments` (pagination
 only, no status filter), `GET /environments/{id}`,
 `GET /environments/{id}/operations` (paginated history), `DELETE /environments/{id}`,
 and `GET /operations/{id}`. Environment events routes are not implemented. Operation detail
-includes durable progress events. Acceptance still returns `REQUESTED` / `PENDING`;
-only the worker can verify readiness and mark the environment `READY`.
+includes durable progress events. Creation acceptance returns `REQUESTED` / `PENDING`;
+deletion acceptance returns `DELETING` with a `PENDING`/`RUNNING` operation.
+Only the worker can verify readiness or namespace absence.
 
 | Method | Route | Purpose |
 |---|---|---|

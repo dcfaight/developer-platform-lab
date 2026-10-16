@@ -66,6 +66,8 @@ def timestamp(value):
     if not isinstance(value, str) or not re.fullmatch(
             r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)", value):
         raise Failure("INVALID_TIMESTAMP")
+    if not value.endswith("Z") and (int(value[-5:-3]) > 23 or int(value[-2:]) > 59):
+        raise Failure("INVALID_TIMESTAMP")
     try:
         result = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
@@ -177,12 +179,14 @@ class Client:
         connection_type = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
         connection = connection_type(host, port, timeout=self.args.connect_timeout)
         timer = None
+        expired = threading.Event()
         try:
             connection.connect()
             # A wall-clock request deadline also bounds slow headers/bodies.
             sock = connection.sock
 
             def interrupt():
+                expired.set()
                 try:
                     sock.shutdown(socket.SHUT_RDWR)
                 except OSError:
@@ -195,6 +199,8 @@ class Client:
             connection.request(method, "/api/v1" + path, headers={"Accept": "application/json"})
             response = connection.getresponse()
             body = response.read(MAX_BODY + 1)
+            if expired.is_set():
+                raise Failure("TRANSPORT_ERROR")
             if len(body) > MAX_BODY:
                 raise Failure("RESPONSE_TOO_LARGE", response.status)
             request_id = safe_token(response.getheader("X-Request-Id"))
@@ -361,7 +367,11 @@ def run(args, clock=lambda: datetime.now(timezone.utc), client=None):
                             "environmentId": identity, "operationId": operation,
                             "source": "recovery", "observedStatus": state})
                         continue
-                    result["failed"] += 1
+                    ambiguous = (error.status is None or error.status < 300
+                                 or error.status >= 500 or error.status == 408)
+                    # A recovery read can overtake a still-running DELETE. An
+                    # unchanged create state does not prove nonacceptance.
+                    result["unknown" if ambiguous and state != "DELETE_FAILED" else "failed"] += 1
                     error_record(error, identity)
                 except Failure as recovery_error:
                     result["unknown"] += 1

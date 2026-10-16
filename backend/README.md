@@ -10,7 +10,7 @@ See the [API contract](../docs/api.md) for schemas and validation.
 An opt-in worker claims create and delete operations with PostgreSQL leases, provisions
 platform-owned namespaces and an approved sample Deployment in local kind,
 and records durable progress and sanitized failures in operation detail.
-Acceptance remains `REQUESTED` / `PENDING`; only observed workload readiness
+Creation acceptance remains `REQUESTED` / `PENDING`; only observed workload readiness
 permits `READY`. Deletion is explicit; TTL expiration does not trigger cleanup.
 The [manual expiration CLI](../automation/README.md) defaults to dry-run and
 requests deletion only with `--execute`; no expiration daemon is installed.
@@ -251,6 +251,9 @@ Backend integration tests use Testcontainers with `postgres:18.6`; they require
 a working Docker daemon and do not skip when Docker is unavailable. They use
 their own database container, not the Compose database, and need no local
 `DB_*` exports. CI checks Docker availability before Maven verification.
+Python 3.12 (`python3` on PATH) is also required: a real HTTP/backend/PostgreSQL
+test invokes the cleanup CLI against controlled expired fixtures, checking
+read-only dry-run and durable deletion requests without Kubernetes access.
 
 Kubernetes HTTP tests exercise the actual client against a local API test
 server. The smaller cluster test is opt-in locally and runs in its own CI job:

@@ -43,6 +43,9 @@ jobs:
           cache: maven
       - name: Verify Docker availability for Testcontainers
         run: docker info
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
       - run: ./mvnw --batch-mode verify
 
   provisioning:
