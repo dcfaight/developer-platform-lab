@@ -265,7 +265,10 @@ Area README files describe the current scope.
 
 See the [Kubernetes deployment baseline and roadmap](docs/pre-kubernetes.md)
 for what exists today, what is still missing, and how the current host-run kind
-workflow differs from the planned local K3s deployment.
+workflow differs from the local K3s target. First-pass
+[K3s API-only packaging and setup](infra/README.md#local-k3s-platform-api-only)
+now covers the UI, API, PostgreSQL persistence, and local TLS ingress; in-cluster
+worker access and full lifecycle validation remain future work.
 
 ## 8. Domain Model
 

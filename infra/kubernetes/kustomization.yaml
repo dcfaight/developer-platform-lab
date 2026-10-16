@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: platform-lab
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - backend.yaml
+  - frontend.yaml
+  - ingress.yaml
+configMapGenerator:
+  - name: platform-config
+    literals:
+      - POSTGRES_DB=platform_lab
+      - POSTGRES_USER=platform_lab
+      - DB_URL=jdbc:postgresql://postgres:5432/platform_lab
+  - name: frontend-nginx
+    files:
+      - nginx.conf
+images:
+  - name: platform-lab-backend
+    newTag: k3s-v1
+  - name: platform-lab-frontend
+    newTag: k3s-v1
