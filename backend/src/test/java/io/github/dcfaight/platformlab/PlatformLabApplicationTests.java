@@ -120,7 +120,10 @@ class PlatformLabApplicationTests {
         assertEquals(200, environment.status());
         assertFields(environment.json(), "id", "name", "namespace", "templateId", "status",
                 "expiresAt", "createdAt", "updatedAt", "latestOperation");
-        assertFields(environment.json().path("latestOperation"), "id", "type", "status", "progressStep");
+        assertFields(environment.json().path("latestOperation"), "id", "type", "status", "progressStep",
+                "failureCode", "failureMessage");
+        assertTrue(environment.json().path("latestOperation").path("failureCode").isNull());
+        assertTrue(environment.json().path("latestOperation").path("failureMessage").isNull());
         assertEquals(operationId, environment.json().path("latestOperation").path("id").asText());
         assertEquals("PENDING", environment.json().path("latestOperation").path("status").asText());
         assertEquals(environmentId, environment.json().path("id").asText());

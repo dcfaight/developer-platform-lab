@@ -166,7 +166,9 @@ run-wide snapshot completeness. A valid page beyond the last page returns an emp
     "id": "27f56e9b-382a-4373-a26c-c4dab824d127",
     "type": "CREATE_ENVIRONMENT",
     "status": "PENDING",
-    "progressStep": "ACCEPTED"
+    "progressStep": "ACCEPTED",
+    "failureCode": null,
+    "failureMessage": null
   }
 }
 ```
@@ -179,6 +181,9 @@ Deletion adds `DELETING`, `DELETED`, and `DELETE_FAILED`.
 `latestOperation` is an additive read-only summary of the newest operation by
 `createdAt DESC, id DESC`, or `null` when none exists. `PENDING` and `RUNNING`
 indicate an active operation. This summary does not change creation responses.
+Its nullable `failureCode` and `failureMessage` match operation detail/history,
+including failed provisioning and deletion. The portal displays these summaries
+with code-specific remediation hints; no raw upstream diagnostics are returned.
 
 ## Read environment operation history
 
@@ -253,13 +258,22 @@ Worker failure codes include:
 | Code | Handling |
 |---|---|
 | `KUBERNETES_UNAVAILABLE` | Transient transport, conflict, throttling, or server error; bounded retry. |
-| `KUBERNETES_REQUEST_REJECTED` | Non-retryable Kubernetes request/permission failure. |
+| `KUBERNETES_AUTHENTICATION_FAILED` | Kubernetes HTTP 401; check the worker service account token or kubeconfig credentials and expiry. Non-retryable. |
+| `KUBERNETES_FORBIDDEN` | Kubernetes HTTP 403; check the worker service account's RBAC roles and bindings. Non-retryable. |
+| `KUBERNETES_REQUEST_REJECTED` | Other non-retryable Kubernetes API/resource request failure; check admission policies, quotas, and the resource specification. |
 | `KUBERNETES_VALIDATION_FAILED` | Invalid persisted provisioning input; fail without provisioning. |
 | `KUBERNETES_OWNERSHIP_CONFLICT` | Resource is not an active, owned platform resource; never adopt it. |
-| `READINESS_TIMEOUT` | Initial provisioning did not reach readiness before its deadline. |
-| `DELETION_TIMEOUT` | Namespace absence was not confirmed before the deletion deadline. |
+| `READINESS_TIMEOUT` | Initial provisioning did not reach readiness before its deadline; check Pods, image pulls, readiness probes, scheduling, and namespace events. |
+| `DELETION_TIMEOUT` | Namespace absence was not confirmed before the deletion deadline; check remaining resources and finalizers before retrying deletion. |
 | `ATTEMPTS_EXHAUSTED` | Recovered work exhausted its provisioning attempts. |
 | `INTERNAL_ERROR` | Unexpected failure with a fixed sanitized summary. |
+
+These are asynchronous worker failures, separate from HTTP Basic authentication
+or authorization errors on API mutation requests. Fix the reported cause before
+taking further action. After a failed create, deletion can clean up partial resources;
+after `DELETE_FAILED`, the portal/manual DELETE can request a new deletion operation.
+There is no create-operation retry endpoint. Older persisted failures retain their
+original codes/messages; new classifications apply to subsequent worker failures.
 
 Both detail routes require UUID identifiers. A malformed identifier returns
 `400`; a valid UUID with no record returns `404`.

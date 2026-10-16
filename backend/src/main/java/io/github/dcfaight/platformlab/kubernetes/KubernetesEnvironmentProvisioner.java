@@ -274,6 +274,14 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
             throw exception;
         } catch (KubernetesClientException exception) {
             int status = exception.getCode();
+            if (status == 401) {
+                throw new ProvisioningException("KUBERNETES_AUTHENTICATION_FAILED",
+                        "The Kubernetes API did not accept the worker credentials.", false);
+            }
+            if (status == 403) {
+                throw new ProvisioningException("KUBERNETES_FORBIDDEN",
+                        "The worker does not have permission to access the required Kubernetes resources.", false);
+            }
             boolean retryable = status == 409 || status == 429 || status >= 500
                     || (status <= 0 && causedByIo(exception));
             throw new ProvisioningException(retryable ? "KUBERNETES_UNAVAILABLE" : "KUBERNETES_REQUEST_REJECTED",

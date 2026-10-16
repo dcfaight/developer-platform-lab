@@ -5,6 +5,8 @@ export interface OperationSummary {
   type: string
   status: string
   progressStep: string | null
+  failureCode: string | null
+  failureMessage: string | null
 }
 
 export interface Environment {
@@ -36,8 +38,6 @@ export interface Operation extends OperationSummary {
   completedAt: string | null
   createdAt: string
   updatedAt: string
-  failureCode: string | null
-  failureMessage: string | null
   correlationId: string | null
   events: OperationEvent[]
 }
@@ -126,7 +126,8 @@ function array<T>(value: unknown, decode: Decoder<T>): T[] {
 function summary(value: unknown): OperationSummary {
   const item = object(value)
   return { id: text(item.id), type: text(item.type), status: text(item.status),
-    progressStep: nullableText(item.progressStep) }
+    progressStep: nullableText(item.progressStep),
+    failureCode: nullableText(item.failureCode ?? null), failureMessage: nullableText(item.failureMessage ?? null) }
 }
 
 export function environment(value: unknown): Environment {

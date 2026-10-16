@@ -30,6 +30,7 @@ class KubernetesEnvironmentProvisionerTests {
     private Deployment deployment;
     private int writes;
     private int failure;
+    private int createFailure;
     private boolean createRace;
     private boolean staleUpdate;
     private boolean redirect;
@@ -151,11 +152,40 @@ class KubernetesEnvironmentProvisionerTests {
     void mapsErrorsWithoutLeakingUpstreamMessage() {
         for (int code : new int[] {409, 429, 500, 503, 401, 403, 422}) {
             failure = code;
-            var error = assertThrows(ProvisioningException.class, () -> provisioner.provision(environment));
-            assertEquals(code == 409 || code == 429 || code >= 500, error.retryable());
-            assertFalse(error.getMessage().contains("private-upstream"));
-            assertNull(error.getCause());
+            for (Runnable operation : new Runnable[] {
+                    () -> provisioner.provision(environment),
+                    () -> provisioner.isReady(environment),
+                    () -> provisioner.delete(environment, createOperationId, () -> true)}) {
+                var error = assertThrows(ProvisioningException.class, operation::run);
+                boolean retryable = code == 409 || code == 429 || code >= 500;
+                assertEquals(retryable, error.retryable());
+                assertEquals(switch (code) {
+                    case 401 -> "KUBERNETES_AUTHENTICATION_FAILED";
+                    case 403 -> "KUBERNETES_FORBIDDEN";
+                    default -> retryable ? "KUBERNETES_UNAVAILABLE" : "KUBERNETES_REQUEST_REJECTED";
+                }, error.code());
+                assertEquals(switch (code) {
+                    case 401 -> "The Kubernetes API did not accept the worker credentials.";
+                    case 403 -> "The worker does not have permission to access the required Kubernetes resources.";
+                    default -> retryable ? "The Kubernetes API is temporarily unavailable."
+                            : "The Kubernetes API rejected the environment request.";
+                }, error.getMessage());
+                assertFalse(error.getMessage().contains("private-upstream"));
+                assertNull(error.getCause());
+            }
         }
+    }
+
+    @Test
+    void resourceCreationRejectionHasSafeFailureDetails() {
+        createFailure = 422;
+        var error = assertThrows(ProvisioningException.class, () -> provisioner.provision(environment));
+        assertEquals("KUBERNETES_REQUEST_REJECTED", error.code());
+        assertEquals("The Kubernetes API rejected the environment request.", error.getMessage());
+        assertFalse(error.retryable());
+        assertNull(error.getCause());
+        assertNull(namespace);
+        assertEquals(0, writes);
     }
 
     @Test
@@ -386,6 +416,10 @@ class KubernetesEnvironmentProvisionerTests {
                 Object resource = namespaces ? namespace : deployment;
                 respond(exchange, resource == null ? 404 : 200, resource);
             } else if ("POST".equals(method)) {
+                if (createFailure != 0) {
+                    respond(exchange, createFailure, null);
+                    return;
+                }
                 if (createRace) {
                     respond(exchange, 409, null);
                     return;
