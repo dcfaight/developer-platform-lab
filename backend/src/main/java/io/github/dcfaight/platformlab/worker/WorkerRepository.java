@@ -1,5 +1,6 @@
 package io.github.dcfaight.platformlab.worker;
 
+import io.github.dcfaight.platformlab.operation.OperationMilestone;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
@@ -82,6 +83,22 @@ public class WorkerRepository {
                 "Resources were provisioned; waiting for readiness.", null, null, Duration.ZERO, false, true);
     }
 
+    public boolean progress(Claim claim, OperationMilestone milestone) {
+        return jdbc.queryForObject("""
+                WITH changed AS (
+                    UPDATE operations SET progress_step = ?, updated_at = clock_timestamp()
+                    WHERE id = ? AND status = 'RUNNING' AND lease_token = ?
+                        AND lease_expires_at > clock_timestamp()
+                    RETURNING id, correlation_id
+                ), event AS (
+                    INSERT INTO operation_events (operation_id, type, code, message, correlation_id)
+                    SELECT id, ?, ?, ?, correlation_id FROM changed
+                )
+                SELECT count(*) FROM changed
+                """, Integer.class, milestone.name(), claim.id(), claim.leaseToken(),
+                milestone.name(), milestone.name(), milestone.message()) == 1;
+    }
+
     public boolean waiting(Claim claim, Duration delay) {
         return transition(claim, "PENDING", "WAITING", "WAITING", "WAITING",
                 "Resources are not ready yet.", null, null, delay, false, false);
@@ -94,10 +111,10 @@ public class WorkerRepository {
 
     public boolean succeed(Claim claim) {
         if (claim.deleting()) {
-            return transition(claim, "SUCCEEDED", "DELETED", "SUCCEEDED", "SUCCEEDED",
+            return transition(claim, "SUCCEEDED", "DELETED", "SUCCEEDED", "DELETE_COMPLETED",
                     "Environment namespace is absent.", null, null, Duration.ZERO, false, false);
         }
-        return transition(claim, "SUCCEEDED", "READY", "SUCCEEDED", "SUCCEEDED",
+        return transition(claim, "SUCCEEDED", "READY", "SUCCEEDED", "READY",
                 "Environment is ready.", null, null, Duration.ZERO, false, false);
     }
 

@@ -361,6 +361,30 @@ describe('portal', () => {
     expect(await screen.findByRole('link', { name: demoEnvironment.name })).toBeTruthy()
   })
 
+  it('renders provisioning milestones and failures in chronological operation history', async () => {
+    window.history.replaceState(null, '', `/#environment/${demoEnvironment.id}`)
+    const milestones = [
+      ['PROVISION_STARTED', 'Provisioning resources for the environment.'],
+      ['NAMESPACE_CREATED', 'The environment namespace was created.'],
+      ['WORKLOAD_CREATION_STARTED', 'Creating the environment deployment.'],
+      ['FAILED', 'Kubernetes access was denied.'],
+    ]
+    mockPortal({ ...demoOperation, status: 'FAILED', events: milestones.map(([type, message], index) => ({
+      type, code: type === 'FAILED' ? 'KUBERNETES_FORBIDDEN' : type, message,
+      correlationId: demoOperation.correlationId, createdAt: `2026-10-16T05:00:0${index}Z`,
+    })) })
+    render(<App />)
+    const card = await screen.findByRole('article', { name: `Operation ${demoOperation.id}` })
+    expect(within(card).getByText('4 recorded events · Oldest first')).toBeTruthy()
+    const events = within(card).getAllByRole('listitem')
+    expect(events).toHaveLength(milestones.length)
+    for (const [index, [type, message]] of milestones.entries()) {
+      expect(within(events[index]).getByText(type.replaceAll('_', ' '))).toBeTruthy()
+      expect(within(events[index]).getByText(message)).toBeTruthy()
+      expect(events[index].querySelector('time')?.getAttribute('datetime')).toBe(`2026-10-16T05:00:0${index}Z`)
+    }
+  })
+
   it.each(['PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED'])(
     'renders %s operations and safely displays sanitized message fields', async (status) => {
       window.history.replaceState(null, '', `/#environment/${demoEnvironment.id}`)

@@ -10,6 +10,7 @@ import io.github.dcfaight.platformlab.environment.CreateEnvironmentRequest;
 import io.github.dcfaight.platformlab.kubernetes.EnvironmentProvisioner;
 import io.github.dcfaight.platformlab.kubernetes.ProvisioningException;
 import io.github.dcfaight.platformlab.operation.OperationRepository;
+import io.github.dcfaight.platformlab.operation.OperationMilestone;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
@@ -83,6 +84,7 @@ class WorkerTests {
         var stale = repository.claim(properties).orElseThrow();
         expire(id);
         assertFalse(repository.provisioned(stale));
+        assertFalse(repository.progress(stale, OperationMilestone.NAMESPACE_CREATED));
         assertFalse(repository.waiting(stale, Duration.ZERO));
         assertFalse(repository.retry(stale, "TRANSIENT", "Temporary failure.", Duration.ZERO));
         assertFalse(repository.fail(stale, "FAILED", "Failure."));
@@ -93,6 +95,7 @@ class WorkerTests {
         var recovered = repository.claim(properties).orElseThrow();
         assertNotEquals(stale.leaseToken(), recovered.leaseToken());
         assertEquals(2, operations.find(id).orElseThrow().attemptCount());
+        assertFalse(repository.progress(stale, OperationMilestone.NAMESPACE_CREATED));
         assertFalse(repository.succeed(stale));
         assertTrue(repository.succeed(recovered));
         assertEquals("READY", environmentStatus(id));
@@ -106,10 +109,44 @@ class WorkerTests {
         worker.poll();
         assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
         assertEquals("READY", environmentStatus(id));
-        assertEquals(List.of("CLAIMED", "PROVISIONED", "SUCCEEDED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROVISION_STARTED", "PROVISIONED", "SUCCEEDED"), eventTypes(id));
+        assertEquals("READY", operations.events(id).get(3).code());
         assertTrue(operations.events(id).stream().allMatch(event -> event.createdAt() != null));
         worker.poll();
-        verify(provisioner, times(1)).provision(any(), any(), any());
+        verify(provisioner, times(1)).provision(any(), any(), any(), any());
+    }
+
+    @Test
+    void provisioningMilestonesArePersistedInOrder() {
+        UUID id = create();
+        doAnswer(invocation -> {
+            java.util.function.Predicate<OperationMilestone> progress = invocation.getArgument(3);
+            assertTrue(progress.test(OperationMilestone.NAMESPACE_CREATED));
+            assertTrue(progress.test(OperationMilestone.WORKLOAD_CREATION_STARTED));
+            return null;
+        }).when(provisioner).provision(any(), any(), any(), any());
+        when(provisioner.isReady(any())).thenReturn(true);
+        worker.poll();
+        assertEquals(List.of("CLAIMED", "PROVISION_STARTED", "NAMESPACE_CREATED",
+                "WORKLOAD_CREATION_STARTED", "PROVISIONED", "SUCCEEDED"), eventTypes(id));
+        var restarted = new OperationRepository(jdbc);
+        assertEquals(operations.events(id), restarted.events(id));
+        assertEquals("READY", restarted.events(id).get(5).code());
+    }
+
+    @Test
+    void partialProvisioningFailureRetainsMilestones() {
+        UUID id = create();
+        doAnswer(invocation -> {
+            java.util.function.Predicate<OperationMilestone> progress = invocation.getArgument(3);
+            assertTrue(progress.test(OperationMilestone.NAMESPACE_CREATED));
+            assertTrue(progress.test(OperationMilestone.WORKLOAD_CREATION_STARTED));
+            throw new ProvisioningException("KUBERNETES_FORBIDDEN", "Kubernetes access was denied.", false);
+        }).when(provisioner).provision(any(), any(), any(), any());
+        worker.poll();
+        assertEquals(List.of("CLAIMED", "PROVISION_STARTED", "NAMESPACE_CREATED",
+                "WORKLOAD_CREATION_STARTED", "FAILED"), eventTypes(id));
+        assertEquals("KUBERNETES_FORBIDDEN", operations.events(id).get(4).code());
     }
 
     @Test
@@ -161,7 +198,7 @@ class WorkerTests {
         doAnswer(invocation -> {
             assertTrue(((java.util.function.BooleanSupplier) invocation.getArgument(2)).getAsBoolean());
             throw new Error("Simulated process termination after Kubernetes accepted resources");
-        }).when(provisioner).provision(any(), any(), any());
+        }).when(provisioner).provision(any(), any(), any(), any());
         assertThrows(Error.class, worker::poll);
         assertEquals("RUNNING", operations.find(id).orElseThrow().status());
         assertNull(jdbc.queryForObject("SELECT provisioned_at FROM operations WHERE id = ?",
@@ -169,16 +206,17 @@ class WorkerTests {
 
         expire(id);
         // Matching resources need no mutation callback, just like a terminating/absent namespace on DELETE.
-        doNothing().when(provisioner).provision(any(), any(), any());
+        doNothing().when(provisioner).provision(any(), any(), any(), any());
         when(provisioner.isReady(any())).thenReturn(true);
         worker = new ProvisioningWorker(new WorkerRepository(jdbc), environments, provisioner, properties);
         worker.poll();
         assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
         assertEquals("READY", environmentStatus(id));
         assertEquals(properties.maxAttempts() + 1, operations.find(id).orElseThrow().attemptCount());
-        assertEquals("LEASE_RECOVERED", operations.events(id).get(properties.maxAttempts()).code());
+        assertEquals(properties.maxAttempts(), operations.events(id).stream()
+                .filter(event -> "LEASE_RECOVERED".equals(event.code())).count());
         worker.poll();
-        verify(provisioner, times(2)).provision(any(), eq(id), any());
+        verify(provisioner, times(2)).provision(any(), eq(id), any(), any());
     }
 
     @Test
@@ -205,7 +243,7 @@ class WorkerTests {
             worker.poll();
         }
         assertEquals(1, operations.find(id).orElseThrow().attemptCount());
-        verify(provisioner, times(1)).provision(any(), any(), any());
+        verify(provisioner, times(1)).provision(any(), any(), any(), any());
         when(provisioner.isReady(any())).thenReturn(true);
         due(id);
         worker.poll();
@@ -234,7 +272,7 @@ class WorkerTests {
         when(failure.retryable()).thenReturn(true);
         when(failure.code()).thenReturn("KUBERNETES_UNAVAILABLE");
         when(failure.getMessage()).thenReturn("Kubernetes is unavailable.");
-        doThrow(failure).when(provisioner).provision(any(), any(), any());
+        doThrow(failure).when(provisioner).provision(any(), any(), any(), any());
         worker.poll();
         assertEquals("PENDING", operations.find(id).orElseThrow().status());
         assertEquals(Boolean.TRUE, jdbc.queryForObject("""
@@ -247,7 +285,8 @@ class WorkerTests {
         assertEquals("FAILED", operations.find(id).orElseThrow().status());
         assertEquals(3, operations.find(id).orElseThrow().attemptCount());
         assertEquals("KUBERNETES_UNAVAILABLE", operations.find(id).orElseThrow().failureCode());
-        assertEquals(List.of("CLAIMED", "RETRY", "CLAIMED", "RETRY", "CLAIMED", "FAILED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROVISION_STARTED", "RETRY", "CLAIMED", "PROVISION_STARTED",
+                "RETRY", "CLAIMED", "PROVISION_STARTED", "FAILED"), eventTypes(id));
     }
 
     @Test
@@ -257,12 +296,12 @@ class WorkerTests {
         when(failure.retryable()).thenReturn(false);
         when(failure.code()).thenReturn("KUBERNETES_FORBIDDEN");
         when(failure.getMessage()).thenReturn("Kubernetes access was denied.");
-        doThrow(failure).when(provisioner).provision(any(), any(), any());
+        doThrow(failure).when(provisioner).provision(any(), any(), any(), any());
         worker.poll();
         assertEquals("FAILED", operations.find(id).orElseThrow().status());
         assertEquals("FAILED", environmentStatus(id));
         assertTrue(repository.claim(properties).isEmpty());
-        assertEquals(List.of("CLAIMED", "FAILED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROVISION_STARTED", "FAILED"), eventTypes(id));
     }
 
     @Test
@@ -279,7 +318,7 @@ class WorkerTests {
         }
         assertEquals("FAILED", operations.find(id).orElseThrow().status());
         assertEquals(1, operations.find(id).orElseThrow().attemptCount());
-        verify(provisioner, times(1)).provision(any(), any(), any());
+        verify(provisioner, times(1)).provision(any(), any(), any(), any());
         verify(provisioner, times(3)).isReady(any());
     }
 
@@ -293,12 +332,12 @@ class WorkerTests {
         worker.poll();
         assertEquals("RUNNING", operations.find(id).orElseThrow().status());
         assertEquals("PROVISIONING", environmentStatus(id));
-        assertEquals(List.of("CLAIMED", "PROVISIONED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROVISION_STARTED", "PROVISIONED"), eventTypes(id));
         when(provisioner.isReady(any())).thenReturn(true);
         worker.poll();
         assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
         assertEquals("READY", environmentStatus(id));
-        verify(provisioner, times(1)).provision(any(), any(), any());
+        verify(provisioner, times(1)).provision(any(), any(), any(), any());
     }
 
     @Test
@@ -313,7 +352,7 @@ class WorkerTests {
             ((java.util.function.BooleanSupplier) invocation.getArgument(2)).getAsBoolean();
             fail("An exhausted reclaim must not issue a Kubernetes write");
             return null;
-        }).when(provisioner).provision(any(), any(), any());
+        }).when(provisioner).provision(any(), any(), any(), any());
         worker = new ProvisioningWorker(restart, environments, provisioner, properties);
         worker.poll();
         assertEquals("FAILED", operations.find(id).orElseThrow().status());
@@ -328,7 +367,7 @@ class WorkerTests {
     @Test
     void unexpectedExceptionIsSanitizedPersistedAndNotSwallowed() {
         UUID id = create();
-        doThrow(new IllegalStateException("secret-token-response-body")).when(provisioner).provision(any(), any(), any());
+        doThrow(new IllegalStateException("secret-token-response-body")).when(provisioner).provision(any(), any(), any(), any());
         var thrown = assertThrows(IllegalStateException.class, worker::poll);
         assertFalse(thrown.getMessage().contains("secret"));
         assertNull(thrown.getCause());
@@ -336,7 +375,7 @@ class WorkerTests {
         assertEquals("FAILED", operation.status());
         assertEquals("INTERNAL_ERROR", operation.failureCode());
         assertEquals("An internal provisioning error occurred.", operation.failureMessage());
-        assertEquals(List.of("CLAIMED", "FAILED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROVISION_STARTED", "FAILED"), eventTypes(id));
     }
 
     @Test
@@ -361,9 +400,13 @@ class WorkerTests {
         assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
         assertEquals("DELETED", operations.find(id).orElseThrow().progressStep());
         assertEquals("DELETED", environmentStatus(id));
-        verify(provisioner, never()).provision(any(), any(), any());
+        verify(provisioner, never()).provision(any(), any(), any(), any());
         verify(provisioner, times(3)).delete(any(), eq(createId), any());
         assertEquals(1, operations.find(id).orElseThrow().attemptCount());
+        assertEquals(1, eventTypes(id).stream().filter("DELETE_STARTED"::equals).count());
+        var completed = operations.events(id).get(operations.events(id).size() - 1);
+        assertEquals("SUCCEEDED", completed.type());
+        assertEquals("DELETE_COMPLETED", completed.code());
     }
 
     @Test
@@ -419,7 +462,7 @@ class WorkerTests {
         }).when(expiring).find(environmentId);
         worker = new ProvisioningWorker(repository, expiring, provisioner, properties);
         worker.poll();
-        verify(provisioner, never()).provision(any(), any(), any());
+        verify(provisioner, never()).provision(any(), any(), any(), any());
         assertEquals("RUNNING", operations.find(id).orElseThrow().status());
         assertEquals(List.of("CLAIMED"), eventTypes(id));
     }
@@ -467,7 +510,8 @@ class WorkerTests {
         }
         assertEquals("FAILED", operations.find(id).orElseThrow().status());
         assertEquals("DELETE_FAILED", environmentStatus(id));
-        assertEquals(List.of("CLAIMED", "RETRY", "CLAIMED", "RETRY", "CLAIMED", "FAILED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "DELETE_STARTED", "RETRY", "CLAIMED", "DELETE_STARTED",
+                "RETRY", "CLAIMED", "DELETE_STARTED", "FAILED"), eventTypes(id));
         UUID environmentId = operations.find(id).orElseThrow().environmentId();
         var retry = service.delete(environmentId, "worker-test");
         assertNotEquals(id, retry.operationId());
@@ -540,11 +584,11 @@ class WorkerTests {
         worker.poll();
         assertEquals("RUNNING", operations.find(id).orElseThrow().status());
         assertEquals("DELETING", environmentStatus(id));
-        assertEquals(List.of("CLAIMED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "DELETE_STARTED"), eventTypes(id));
         doReturn(true).when(provisioner).delete(any(), any(), any());
         worker.poll();
         assertEquals("DELETED", environmentStatus(id));
-        assertEquals(List.of("CLAIMED", "CLAIMED", "SUCCEEDED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "DELETE_STARTED", "CLAIMED", "DELETE_STARTED", "SUCCEEDED"), eventTypes(id));
     }
 
     @Test

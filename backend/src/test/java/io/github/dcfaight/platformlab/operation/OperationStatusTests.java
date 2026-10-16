@@ -58,6 +58,9 @@ class OperationStatusTests {
         var claim = worker.claim(new WorkerProperties(Duration.ofSeconds(30), 5, Duration.ofSeconds(2),
                 Duration.ofSeconds(5), Duration.ofMinutes(5))).orElseThrow();
         assertEquals(id, claim.id());
+        assertTrue(worker.progress(claim, OperationMilestone.PROVISION_STARTED));
+        assertTrue(worker.progress(claim, OperationMilestone.NAMESPACE_CREATED));
+        assertTrue(worker.progress(claim, OperationMilestone.WORKLOAD_CREATION_STARTED));
         worker.provisioned(claim);
         worker.fail(claim, "KUBERNETES_FORBIDDEN", "Kubernetes access was denied.");
 
@@ -75,10 +78,13 @@ class OperationStatusTests {
         assertFalse(status.path("startedAt").isNull());
         assertFalse(status.path("completedAt").isNull());
         assertTrue(status.path("leaseExpiresAt").isNull());
-        assertEquals(3, status.path("events").size());
+        assertEquals(6, status.path("events").size());
         assertEquals("CLAIMED", status.path("events").get(0).path("type").asText());
-        assertEquals("PROVISIONED", status.path("events").get(1).path("type").asText());
-        assertEquals("FAILED", status.path("events").get(2).path("type").asText());
+        assertEquals("PROVISION_STARTED", status.path("events").get(1).path("type").asText());
+        assertEquals("NAMESPACE_CREATED", status.path("events").get(2).path("type").asText());
+        assertEquals("WORKLOAD_CREATION_STARTED", status.path("events").get(3).path("type").asText());
+        assertEquals("PROVISIONED", status.path("events").get(4).path("type").asText());
+        assertEquals("FAILED", status.path("events").get(5).path("type").asText());
         for (var event : status.path("events")) {
             assertEquals(correlation, event.path("correlationId").asText());
             assertFalse(event.path("code").asText().isEmpty());

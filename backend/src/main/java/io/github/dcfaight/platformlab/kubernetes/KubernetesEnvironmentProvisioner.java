@@ -10,10 +10,12 @@ import io.fabric8.kubernetes.api.model.apps.DeploymentBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.github.dcfaight.platformlab.environment.EnvironmentRepository.EnvironmentRecord;
+import io.github.dcfaight.platformlab.operation.OperationMilestone;
 import jakarta.annotation.PreDestroy;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -53,9 +55,16 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
 
     @Override
     public void provision(EnvironmentRecord environment, UUID createOperationId, BooleanSupplier leaseValid) {
+        provision(environment, createOperationId, leaseValid, milestone -> true);
+    }
+
+    @Override
+    public void provision(EnvironmentRecord environment, UUID createOperationId, BooleanSupplier leaseValid,
+            Predicate<OperationMilestone> progress) {
         execute(() -> {
             validate(environment);
             Namespace namespace = client.namespaces().withName(environment.namespace()).get();
+            boolean created = namespace == null;
             if (namespace == null) {
                 var labels = new java.util.HashMap<>(ownership(environment));
                 if (createOperationId != null) {
@@ -73,10 +82,16 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
             if (createOperationId != null) {
                 requireCreateOwnerIfPresent(namespace, createOperationId);
             }
+            if (!progress.test(created ? OperationMilestone.NAMESPACE_CREATED : OperationMilestone.NAMESPACE_OBSERVED)) {
+                return null;
+            }
             Deployment existing = client.apps().deployments().inNamespace(environment.namespace())
                     .withName(DEPLOYMENT).get();
             Deployment desired = deployment(environment);
             if (existing == null) {
+                if (!progress.test(OperationMilestone.WORKLOAD_CREATION_STARTED)) {
+                    return null;
+                }
                 if (!leaseValid.getAsBoolean()) {
                     return null;
                 }
@@ -84,6 +99,9 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
             } else {
                 requireOwned(existing, environment);
                 if (!desired.getSpec().equals(existing.getSpec())) {
+                    if (!progress.test(OperationMilestone.WORKLOAD_UPDATE_STARTED)) {
+                        return null;
+                    }
                     // Preserve metadata and lock the exact resource read; a race must never adopt a replacement.
                     desired.setMetadata(existing.getMetadata());
                     if (!leaseValid.getAsBoolean()) {

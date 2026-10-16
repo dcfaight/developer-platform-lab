@@ -150,6 +150,52 @@ Recovery waits for the persisted lease to expire; startup does not revoke leases
 that another backend may still own. Reclaimed operations retain the `CLAIMED`
 event type with code `LEASE_RECOVERED` and an explanatory message in operation detail.
 
+### Operation observability
+
+`GET /api/v1/operations/{operationId}` includes an oldest-first `events` timeline.
+`GET /api/v1/environments/{environmentId}/operations?page=0&size=5` returns the
+same timelines in paginated operation history. The portal already displays these
+events under **Environment detail → Operation history → Progress history**.
+The parent operation supplies its operation/environment IDs; each event includes
+`type`, `code`, a fixed operator-safe `message`, `correlationId`, and `createdAt`.
+
+Milestones include `CLAIMED`, `PROVISION_STARTED`, `NAMESPACE_CREATED` (or
+`NAMESPACE_OBSERVED` when recovering an existing owned namespace),
+`WORKLOAD_CREATION_STARTED` / `WORKLOAD_UPDATE_STARTED`, `PROVISIONED`,
+`WAITING`, `DELETE_STARTED`, `RETRY`, and terminal `SUCCEEDED` / `FAILED`.
+Successful events use code `READY` or `DELETE_COMPLETED`. Failures retain their
+sanitized failure code/message. Starts may repeat across retries or recovery;
+creation is recorded only after Kubernetes accepts it. A crash between a
+Kubernetes write and the database event can leave a missing creation event;
+recovery records observation instead of claiming a second creation.
+All worker events are lease-fenced and persisted atomically with their progress
+checkpoint, without raw Kubernetes responses or exception text.
+
+`GET /api/v1/operations/metrics` is a lightweight database-backed snapshot:
+
+```sh
+curl -s http://127.0.0.1:8080/api/v1/operations/metrics
+```
+
+- `counts`: `PENDING`, `RUNNING`, `SUCCEEDED`, `FAILED`, including zeros.
+- `completedDuration`: `count`, `averageMillis`, `maxMillis` from first start to
+  completion for succeeded/failed operations with both timestamps.
+- `initialQueueDelay`: the same timing fields from creation to first start for
+  all started operations.
+- `worker`: `localWorkerEnabled` describes only this backend's configuration;
+  `expiredRunningLeases` counts reclaimable running operations, and
+  `oldestPendingAgeMillis` is the oldest pending operation's age since creation
+  (including delayed retries/readiness polls).
+
+Timing summaries use milliseconds, clamp inverted timestamps to zero, and return
+zeros for empty populations. Completion duration includes retry/readiness waits,
+not CPU time. Aggregates cover retained operation records and survive backend
+restarts; they are not process-local counters. An expired lease or growing pending
+age can indicate a stalled/disabled worker, but this is not a worker heartbeat or
+ongoing workload health check. Like existing history reads, this endpoint is
+anonymous/trusted-local; keep it behind the platform's existing network boundary.
+No additional Actuator endpoints are exposed.
+
 The client explicitly selects `kind-developer-platform-lab`, requires a loopback
 HTTPS API server, and rejects executable credential plugins. It does not use the
 current context as permission to reach arbitrary clusters. Keep the kubeconfig

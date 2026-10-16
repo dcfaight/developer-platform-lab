@@ -3,6 +3,7 @@ package io.github.dcfaight.platformlab.worker;
 import io.github.dcfaight.platformlab.environment.EnvironmentRepository;
 import io.github.dcfaight.platformlab.kubernetes.EnvironmentProvisioner;
 import io.github.dcfaight.platformlab.kubernetes.ProvisioningException;
+import io.github.dcfaight.platformlab.operation.OperationMilestone;
 import java.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +41,9 @@ public class ProvisioningWorker {
             try {
                 var environment = environments.find(claim.environmentId()).orElseThrow();
                 if (claim.deleting()) {
+                    if (!claim.provisioned() && !operations.progress(claim, OperationMilestone.DELETE_STARTED)) {
+                        return;
+                    }
                     if (!operations.owns(claim)) {
                         return;
                     }
@@ -61,7 +65,7 @@ public class ProvisioningWorker {
                     return;
                 }
                 if (!claim.provisioned()) {
-                    if (!operations.owns(claim)) {
+                    if (!operations.progress(claim, OperationMilestone.PROVISION_STARTED)) {
                         return;
                     }
                     provisioner.provision(environment, claim.id(), () -> {
@@ -74,7 +78,7 @@ public class ProvisioningWorker {
                                     "Provisioning did not complete within its attempt limits.", false);
                         }
                         return true;
-                    });
+                    }, milestone -> operations.progress(claim, milestone));
                     if (!operations.provisioned(claim)) {
                         return;
                     }

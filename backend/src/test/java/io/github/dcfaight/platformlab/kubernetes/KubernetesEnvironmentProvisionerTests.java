@@ -12,11 +12,14 @@ import io.fabric8.kubernetes.api.model.apps.DeploymentStatusBuilder;
 import io.fabric8.kubernetes.client.Config;
 import io.fabric8.kubernetes.client.utils.Serialization;
 import io.github.dcfaight.platformlab.environment.EnvironmentRepository.EnvironmentRecord;
+import io.github.dcfaight.platformlab.operation.OperationMilestone;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -87,6 +90,49 @@ class KubernetesEnvironmentProvisionerTests {
         assertTrue(pod.getSecurityContext().getRunAsNonRoot());
         provisioner.provision(environment);
         assertEquals(2, writes);
+    }
+
+    @Test
+    void reportsCreationAndRecoveryMilestonesWithoutDuplicateWrites() {
+        var milestones = new ArrayList<OperationMilestone>();
+        provisioner.provision(environment, createOperationId, () -> true, milestones::add);
+        assertEquals(List.of(OperationMilestone.NAMESPACE_CREATED,
+                OperationMilestone.WORKLOAD_CREATION_STARTED), milestones);
+        assertEquals(2, writes);
+        milestones.clear();
+        provisioner.provision(environment, createOperationId, () -> {
+            fail("Matching resources must not request another mutation");
+            return false;
+        }, milestones::add);
+        assertEquals(List.of(OperationMilestone.NAMESPACE_OBSERVED), milestones);
+        assertEquals(2, writes);
+        deployment.getSpec().setReplicas(2);
+        milestones.clear();
+        provisioner.provision(environment, createOperationId, () -> true, milestones::add);
+        assertEquals(List.of(OperationMilestone.NAMESPACE_OBSERVED,
+                OperationMilestone.WORKLOAD_UPDATE_STARTED), milestones);
+        assertEquals(3, writes);
+    }
+
+    @Test
+    void rejectedMilestoneStopsFurtherKubernetesWork() {
+        provisioner.provision(environment, createOperationId, () -> true, milestone -> false);
+        assertNotNull(namespace);
+        assertNull(deployment);
+        assertEquals(1, writes);
+        provisioner.provision(environment, createOperationId, () -> true,
+                milestone -> milestone != OperationMilestone.WORKLOAD_CREATION_STARTED);
+        assertNull(deployment);
+        assertEquals(1, writes);
+    }
+
+    @Test
+    void failedNamespaceCreationDoesNotReportCreated() {
+        createFailure = 403;
+        var milestones = new ArrayList<OperationMilestone>();
+        assertThrows(ProvisioningException.class,
+                () -> provisioner.provision(environment, createOperationId, () -> true, milestones::add));
+        assertTrue(milestones.isEmpty());
     }
 
     @Test
