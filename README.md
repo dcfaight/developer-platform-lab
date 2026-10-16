@@ -268,8 +268,11 @@ for what exists today, what is still missing, and how the current host-run kind
 workflow differs from the local K3s target. First-pass
 [K3s packaging and setup](infra/README.md#local-k3s-platform)
 now covers the UI, API, PostgreSQL persistence, local TLS ingress, and an explicit
-in-cluster worker with projected credentials and dedicated RBAC. Authenticated
-lifecycle validation is opt-in; setup alone is not evidence of a successful run.
+in-cluster worker with projected credentials and dedicated RBAC. After PR #14,
+[manual K3s lifecycle validation passed on the disposable lab cluster](infra/README.md#recorded-lifecycle-validation--2026-10-16):
+create → ready → authenticated delete → namespace cleanup. This lab goal is
+complete; production readiness, backup/restore, and restart persistence are not
+implied. Automated lifecycle validation remains opt-in.
 
 ## 8. Domain Model
 
