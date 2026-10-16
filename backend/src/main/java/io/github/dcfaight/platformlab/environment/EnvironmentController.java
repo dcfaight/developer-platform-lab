@@ -1,9 +1,13 @@
 package io.github.dcfaight.platformlab.environment;
 
 import io.github.dcfaight.platformlab.config.ApiIds;
+import io.github.dcfaight.platformlab.config.ApiException;
 import io.github.dcfaight.platformlab.operation.OperationPage;
 import jakarta.validation.Valid;
 import java.net.URI;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -45,8 +49,18 @@ public class EnvironmentController {
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity<AcceptedEnvironmentResponse> delete(@PathVariable String id) {
-        var result = service.delete(ApiIds.parse(id));
+    public ResponseEntity<AcceptedEnvironmentResponse> delete(@PathVariable String id,
+            @RequestParam(required = false) String expiredBefore) {
+        Instant cutoff = null;
+        if (expiredBefore != null) {
+            try {
+                cutoff = Instant.parse(expiredBefore);
+            } catch (DateTimeParseException exception) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST",
+                        "expiredBefore must be an ISO instant with a timezone.");
+            }
+        }
+        var result = service.delete(ApiIds.parse(id), cutoff);
         return ResponseEntity.accepted().location(URI.create("/api/v1/operations/" + result.operationId()))
                 .body(result);
     }

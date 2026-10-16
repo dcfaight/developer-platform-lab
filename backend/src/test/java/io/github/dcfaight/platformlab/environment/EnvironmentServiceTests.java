@@ -22,6 +22,7 @@ import java.util.UUID;
 import io.github.dcfaight.platformlab.config.ApiException;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.http.HttpStatus;
 
 class EnvironmentServiceTests {
     @Test
@@ -47,6 +48,27 @@ class EnvironmentServiceTests {
         var service = new EnvironmentService(environments, operations, idempotency, audit, Clock.systemUTC());
         assertThrows(ApiException.class, () -> service.delete(id));
         verifyNoInteractions(operations, audit, idempotency);
+    }
+
+    @Test
+    void expiryGuardAcceptsServerClockBoundaryButRejectsFutureNanosecond() {
+        var environments = mock(EnvironmentRepository.class);
+        var operations = mock(OperationRepository.class);
+        var idempotency = mock(IdempotencyRepository.class);
+        var audit = mock(AuditRepository.class);
+        UUID id = UUID.randomUUID();
+        Instant now = Instant.parse("2026-10-16T12:34:56.123456Z");
+        when(environments.lock(id)).thenReturn(Optional.of(new EnvironmentRecord(id, "Expired",
+                "env-" + id.toString().replace("-", ""), "sample-service", "READY", now,
+                now.minusSeconds(3600), now)));
+        var service = new EnvironmentService(environments, operations, idempotency, audit,
+                Clock.fixed(now, ZoneId.of("Asia/Tokyo")));
+
+        var future = assertThrows(ApiException.class, () -> service.delete(id, now.plusNanos(1)));
+        assertEquals(HttpStatus.BAD_REQUEST, future.status());
+        assertEquals("INVALID_REQUEST", future.code());
+        verifyNoInteractions(environments, operations, audit, idempotency);
+        assertEquals("DELETING", service.delete(id, now).environmentStatus());
     }
 
     private void assertCreationTimestamps(Integer suppliedTtl, int expectedTtl) {

@@ -10,8 +10,10 @@ See the [API contract](../docs/api.md) for schemas and validation.
 An opt-in worker claims create and delete operations with PostgreSQL leases, provisions
 platform-owned namespaces and an approved sample Deployment in local kind,
 and records durable progress and sanitized failures in operation detail.
-Acceptance remains `REQUESTED` / `PENDING`; only observed workload readiness
+Creation acceptance remains `REQUESTED` / `PENDING`; only observed workload readiness
 permits `READY`. Deletion is explicit; TTL expiration does not trigger cleanup.
+The [manual expiration CLI](../automation/README.md) defaults to dry-run and
+requests deletion only with `--execute`; no expiration daemon is installed.
 Omitted or `null` TTL defaults to eight hours.
 The [frontend portal](../frontend/README.md) supports environment creation,
 confirmed deletion, list/detail reads, and paginated operation history. It uses
@@ -115,6 +117,13 @@ or `RUNNING` status. `REQUESTED`, `PROVISIONING`, and `DELETED` return `409`;
 IDs return `400`/`404`. After terminal failure, retrying creates a new operation
 and audit record without replacing history.
 
+The optional `expiredBefore` query parameter is an ISO-8601 instant no later than
+the backend clock. Under the environment lock it restricts **new** deletion to
+expired `READY`/`FAILED` records, returning `409` for unexpired or `DELETE_FAILED`
+records. Active deletes are reused; the normal unguarded manual retry remains
+unchanged. Cleanup rechecks detail and uses this atomic guard rather than claiming
+a client read removes lifecycle/expiry races. See the [API contract](../docs/api.md#guarded-expiration-deletion).
+
 API errors use `INVALID_REQUEST` (`400`, malformed UUID), `NOT_FOUND` (`404`),
 `ENVIRONMENT_STATE_CONFLICT` (`409`, disallowed state or active create), and
 `INVALID_ENVIRONMENT_NAMESPACE` (`409`, noncanonical persisted namespace).
@@ -181,7 +190,7 @@ deadline, including crashes before the accepted DELETE could be persisted.
 
 This slice observes initial Deployment readiness, not ongoing health after
 success. It does not provide custom manifests/images, Services, ingress,
-automatic cleanup, production RBAC, or authentication. The portal supports
+scheduled cleanup, production RBAC, or authentication. The portal supports
 creation and confirmed deletion through the backend API; it has no direct
 Kubernetes access.
 Expired TTL metadata does not remove resources.
@@ -242,6 +251,9 @@ Backend integration tests use Testcontainers with `postgres:18.6`; they require
 a working Docker daemon and do not skip when Docker is unavailable. They use
 their own database container, not the Compose database, and need no local
 `DB_*` exports. CI checks Docker availability before Maven verification.
+Python 3.12 (`python3` on PATH) is also required: a real HTTP/backend/PostgreSQL
+test invokes the cleanup CLI against controlled expired fixtures, checking
+read-only dry-run and durable deletion requests without Kubernetes access.
 
 Kubernetes HTTP tests exercise the actual client against a local API test
 server. The smaller cluster test is opt-in locally and runs in its own CI job:

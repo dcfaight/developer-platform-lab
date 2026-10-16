@@ -3,11 +3,16 @@ package io.github.dcfaight.platformlab;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -501,6 +506,268 @@ class PlatformLabApplicationTests {
         var history = get("/api/v1/environments/" + id + "/operations");
         assertEquals(3, history.json().path("totalElements").asInt());
         assertEquals("FAILED", get("/api/v1/operations/" + firstOperation).json().path("status").asText());
+    }
+
+    @Test
+    void guardedDeleteIncludesExpiryBoundaryForReadyAndFailedEnvironments() throws Exception {
+        Instant cutoff = Instant.now().minusSeconds(60).truncatedTo(ChronoUnit.MICROS);
+        for (String status : List.of("READY", "FAILED")) {
+            for (Instant expiry : List.of(cutoff.minus(1, ChronoUnit.MICROS), cutoff)) {
+                UUID id = seedEnvironment(status, expiry);
+                var accepted = guardedDelete(id, cutoff.toString());
+                assertEquals(202, accepted.status(), accepted.body());
+                UUID operationId = UUID.fromString(uuid(accepted.json(), "operationId"));
+                assertEquals("DELETING", get("/api/v1/environments/" + id).json().path("status").asText());
+                assertEquals("DELETE_ENVIRONMENT", jdbc.queryForObject(
+                        "SELECT type FROM operations WHERE id = ?", String.class, operationId));
+                assertEquals(1, jdbc.queryForObject(
+                        "SELECT count(*) FROM audit_events WHERE operation_id = ?", Integer.class, operationId));
+            }
+        }
+        assertEquals(4, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
+    }
+
+    @Test
+    void guardedDeleteRejectsNewerExpiryAndIneligibleStatesWithoutWrites() throws Exception {
+        Instant cutoff = Instant.now().minusSeconds(60).truncatedTo(ChronoUnit.MICROS);
+        for (Instant expiry : List.of(cutoff.plus(1, ChronoUnit.MICROS), Instant.now().plusSeconds(3600))) {
+            for (String status : List.of("READY", "FAILED")) {
+                UUID id = seedEnvironment(status, expiry);
+                assertStateConflict(guardedDelete(id, cutoff.toString()));
+                assertEquals(status, get("/api/v1/environments/" + id).json().path("status").asText());
+            }
+        }
+        for (String status : List.of("REQUESTED", "PROVISIONING", "DELETE_FAILED", "DELETED", "DELETING")) {
+            UUID id = seedEnvironment(status, cutoff.minusSeconds(1));
+            assertStateConflict(guardedDelete(id, cutoff.toString()));
+            assertEquals(status, get("/api/v1/environments/" + id).json().path("status").asText());
+        }
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+    }
+
+    @Test
+    void guardedDeleteDoesNotRetryFailedDeletionButManualDeleteStillDoes() throws Exception {
+        Instant cutoff = Instant.now().minusSeconds(60);
+        UUID id = seedEnvironment("FAILED", cutoff.minusSeconds(1));
+        var first = guardedDelete(id, cutoff.toString());
+        assertEquals(202, first.status(), first.body());
+        UUID failedOperation = UUID.fromString(uuid(first.json(), "operationId"));
+        jdbc.update("UPDATE operations SET status = 'FAILED', completed_at = now() WHERE id = ?", failedOperation);
+        jdbc.update("UPDATE environments SET status = 'DELETE_FAILED' WHERE id = ?", id);
+
+        assertStateConflict(guardedDelete(id, cutoff.toString()));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+        assertEquals("DELETE_FAILED", get("/api/v1/environments/" + id).json().path("status").asText());
+        var manual = delete(id.toString());
+        assertEquals(202, manual.status(), manual.body());
+        assertNotEquals(failedOperation.toString(), uuid(manual.json(), "operationId"));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
+        assertEquals("FAILED", get("/api/v1/operations/" + failedOperation).json().path("status").asText());
+    }
+
+    @Test
+    void guardedDeleteReusesActiveDeletionWithoutRecheckingExpiry() throws Exception {
+        UUID id = seedEnvironment("READY", Instant.now().plusSeconds(3600));
+        var manual = delete(id.toString());
+        assertEquals(202, manual.status(), manual.body());
+        UUID operationId = UUID.fromString(uuid(manual.json(), "operationId"));
+        for (String operationStatus : List.of("PENDING", "RUNNING")) {
+            jdbc.update("UPDATE operations SET status = ? WHERE id = ?", operationStatus, operationId);
+            var reused = guardedDelete(id, Instant.now().minusSeconds(60).toString());
+            assertEquals(202, reused.status(), reused.body());
+            assertEquals(operationId.toString(), uuid(reused.json(), "operationId"));
+            assertEquals(operationStatus, reused.json().path("operationStatus").asText());
+        }
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+    }
+
+    @Test
+    void guardedDeleteRejectsInvalidOrFutureCutoffsWithoutWrites() throws Exception {
+        UUID id = seedEnvironment("READY", Instant.now().minusSeconds(3600));
+        for (String cutoff : List.of("", "not-an-instant", "2026-10-16", "2026-10-16T12:34:56",
+                "2026-02-30T12:34:56Z", Instant.now().plusSeconds(3600).toString())) {
+            var response = guardedDelete(id, cutoff);
+            assertError(response, 400);
+            assertEquals("INVALID_REQUEST", response.json().path("code").asText());
+        }
+        assertEquals("READY", get("/api/v1/environments/" + id).json().path("status").asText());
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+    }
+
+    @Test
+    void guardedDeleteChecksCurrentExpiryAndStatusAfterAcquiringRowLock() throws Exception {
+        Instant cutoff = Instant.now().minusSeconds(60).truncatedTo(ChronoUnit.MICROS);
+        for (boolean changeExpiry : List.of(true, false)) {
+            UUID id = seedEnvironment("READY", cutoff.minusSeconds(1));
+            var executor = Executors.newSingleThreadExecutor();
+            try (var connection = jdbc.getDataSource().getConnection()) {
+                connection.setAutoCommit(false);
+                try (var lock = connection.prepareStatement("SELECT id FROM environments WHERE id = ? FOR UPDATE")) {
+                    lock.setObject(1, id);
+                    try (var rows = lock.executeQuery()) {
+                        assertTrue(rows.next());
+                    }
+                }
+                var pending = executor.submit(() -> guardedDelete(id, cutoff.toString()));
+                long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+                boolean blocked;
+                do {
+                    blocked = jdbc.queryForObject("""
+                            SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                                WHERE wait_event_type = 'Lock' AND query LIKE '%FROM environments WHERE id =%')
+                            """, Boolean.class);
+                    if (!blocked) {
+                        Thread.sleep(20);
+                    }
+                } while (!blocked && System.nanoTime() < deadline);
+                assertTrue(blocked, "DELETE must wait for the existing environment row lock");
+                try (var update = connection.prepareStatement(
+                        "UPDATE environments SET expires_at = ?, status = ? WHERE id = ?")) {
+                    update.setObject(1, (changeExpiry ? Instant.now().plusSeconds(3600) : cutoff.minusSeconds(1))
+                            .atOffset(ZoneOffset.UTC));
+                    update.setString(2, changeExpiry ? "READY" : "DELETE_FAILED");
+                    update.setObject(3, id);
+                    update.executeUpdate();
+                }
+                connection.commit();
+                assertStateConflict(pending.get(10, TimeUnit.SECONDS));
+            } finally {
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+            }
+        }
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+    }
+
+    @Test
+    void pythonCleanupDryRunThenExecuteDeletesOnlyEligibleExpiredFixtures() throws Exception {
+        Instant expired = Instant.now().minusSeconds(3600).truncatedTo(ChronoUnit.MICROS);
+        List<UUID> eligible = List.of(seedEnvironment("READY", expired), seedEnvironment("FAILED", expired));
+        Map<UUID, String> untouched = Map.of(
+                seedEnvironment("READY", Instant.now().plusSeconds(3600)), "READY",
+                seedEnvironment("DELETE_FAILED", expired), "DELETE_FAILED",
+                seedEnvironment("REQUESTED", expired), "REQUESTED",
+                seedEnvironment("PROVISIONING", expired), "PROVISIONING",
+                seedEnvironment("DELETING", expired), "DELETING",
+                seedEnvironment("DELETED", expired), "DELETED");
+
+        Set<String> eligibleIds = new HashSet<>(eligible.stream().map(UUID::toString).toList());
+        JsonNode dryRun = runPythonCleanup(false);
+        assertCleanupSummary(dryRun, "dry-run", 2, 0, 6);
+        assertEquals(eligibleIds, jsonStrings(dryRun.path("selectedIds")));
+        assertEquals(0, dryRun.path("acceptedOperations").size());
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+        assertEquals("READY", get("/api/v1/environments/" + eligible.get(0)).json().path("status").asText());
+        assertEquals("FAILED", get("/api/v1/environments/" + eligible.get(1)).json().path("status").asText());
+
+        JsonNode executed = runPythonCleanup(true);
+        assertCleanupSummary(executed, "execute", 2, 2, 6);
+        assertEquals(eligibleIds, jsonStrings(executed.path("selectedIds")));
+        Set<String> requestedIds = new HashSet<>();
+        Set<String> requestedOperations = new HashSet<>();
+        assertEquals(2, executed.path("acceptedOperations").size());
+        for (JsonNode accepted : executed.path("acceptedOperations")) {
+            String environmentId = uuid(accepted, "environmentId");
+            String operationId = uuid(accepted, "operationId");
+            assertTrue(requestedIds.add(environmentId), "Each eligible environment is requested once");
+            assertTrue(requestedOperations.add(operationId), "Each acceptance has its own durable operation");
+            assertEquals("202", accepted.path("source").asText());
+            assertEquals(environmentId, jdbc.queryForObject(
+                    "SELECT environment_id::text FROM operations WHERE id = ?", String.class,
+                    UUID.fromString(operationId)));
+        }
+        assertEquals(eligibleIds, requestedIds);
+        for (UUID id : eligible) {
+            assertEquals("DELETING", get("/api/v1/environments/" + id).json().path("status").asText());
+            assertEquals(1, jdbc.queryForObject("""
+                    SELECT count(*) FROM operations
+                    WHERE environment_id = ? AND type = 'DELETE_ENVIRONMENT' AND status = 'PENDING'
+                    """, Integer.class, id));
+        }
+        for (var fixture : untouched.entrySet()) {
+            assertEquals(fixture.getValue(),
+                    get("/api/v1/environments/" + fixture.getKey()).json().path("status").asText());
+        }
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+
+        JsonNode repeated = runPythonCleanup(true);
+        assertCleanupSummary(repeated, "execute", 0, 0, 8);
+        assertTrue(repeated.path("selectedIds").isEmpty());
+        assertTrue(repeated.path("acceptedOperations").isEmpty());
+        assertEquals(3, repeated.path("skipReasons").path("DELETING").asInt());
+        assertEquals(requestedOperations,
+                new HashSet<>(jdbc.queryForList("SELECT id::text FROM operations", String.class)));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+    }
+
+    private void assertCleanupSummary(JsonNode summary, String mode, int eligible, int requested, int skipped) {
+        assertEquals(mode, summary.path("mode").asText());
+        assertTrue(summary.path("scanComplete").asBoolean());
+        assertEquals(8, summary.path("scanned").asInt());
+        assertEquals(eligible, summary.path("eligible").asInt());
+        assertEquals(requested, summary.path("requested").asInt());
+        assertEquals(skipped, summary.path("skipped").asInt());
+        assertEquals(0, summary.path("exitStatus").asInt());
+        for (String counter : List.of("duplicates", "failed", "unknown", "alreadyDeleting", "alreadyDeleted")) {
+            assertEquals(0, summary.path(counter).asInt(), counter);
+        }
+        assertTrue(summary.path("errors").isEmpty());
+    }
+
+    private Set<String> jsonStrings(JsonNode values) {
+        Set<String> result = new HashSet<>();
+        for (JsonNode value : values) {
+            assertTrue(result.add(value.asText()), "Duplicate JSON selection");
+        }
+        return result;
+    }
+
+    private JsonNode runPythonCleanup(boolean execute) throws Exception {
+        Path script = Path.of("..", "automation", "cleanup_expired.py").toAbsolutePath().normalize();
+        List<String> command = new ArrayList<>(List.of("python3", script.toString(), "--api-base-url",
+                "http://127.0.0.1:" + port + "/api/v1", "--json"));
+        if (execute) {
+            command.add("--execute");
+        }
+        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+        try {
+            assertTrue(process.waitFor(30, TimeUnit.SECONDS), "Python cleanup timed out");
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            assertEquals(0, process.exitValue(), output);
+            JsonNode summary = mapper.readTree(output);
+            assertTrue(summary.isObject(), output);
+            return summary;
+        } finally {
+            process.destroyForcibly();
+        }
+    }
+
+    private UUID seedEnvironment(String status, Instant expiry) {
+        UUID id = UUID.randomUUID();
+        jdbc.update("""
+                INSERT INTO environments (id, name, namespace, template_id, status,
+                    expires_at, created_at, updated_at)
+                VALUES (?, 'Cleanup fixture', ?, 'sample-service', ?, ?, ?, now())
+                """, id, "env-" + id.toString().replace("-", ""), status, expiry.atOffset(ZoneOffset.UTC),
+                expiry.minusSeconds(3600).atOffset(ZoneOffset.UTC));
+        return id;
+    }
+
+    private ApiResponse guardedDelete(UUID id, String cutoff) throws Exception {
+        return request(port, "DELETE", "/api/v1/environments/" + id + "?expiredBefore="
+                + URLEncoder.encode(cutoff, StandardCharsets.UTF_8), null, Map.of());
+    }
+
+    private void assertStateConflict(ApiResponse response) {
+        assertError(response, 409);
+        assertEquals("ENVIRONMENT_STATE_CONFLICT", response.json().path("code").asText());
     }
 
     @Test

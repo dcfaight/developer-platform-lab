@@ -3,7 +3,9 @@
 The persistent backend slice implements the routes below under `/api/v1`.
 Requests are accepted separately from infrastructure readiness. An opt-in worker
 provisions and deletes the approved sample's owned namespace in local kind and
-exposes progress in operation detail. There is no expiration cleanup or environment events endpoint. The broader
+exposes progress in operation detail. A manually invoked, dry-run-first
+[expiration CLI](../automation/README.md) uses the delete API; there is no cleanup
+daemon or environment events endpoint. The broader
 [blueprint](../README.md#9-proposed-rest-api) describes future behavior.
 
 ## Create an environment
@@ -39,7 +41,8 @@ Unknown JSON fields are rejected. A successful request returns `202 Accepted`,
 ```
 
 `expiresAt` is the creation time plus the requested TTL. It is persisted
-metadata only; passing that time does not trigger cleanup in this slice.
+metadata only; passing that time does not invoke cleanup. Expiry is currently
+immutable. An operator must invoke the cleanup CLI explicitly.
 `sample-service` is the only approved template, mapped to a fixed sample
 Deployment/image by the worker. No arbitrary manifests or images are accepted.
 
@@ -86,6 +89,23 @@ and conflicting lifecycle states are rejected, rather than starting new work.
 After a terminal `DELETE_FAILED`, an explicit new DELETE creates a new durable
 operation, preserving the failed attempt's history.
 
+### Guarded expiration deletion
+
+Cleanup uses the same route with optional `?expiredBefore=<ISO-8601 instant>`,
+for example `?expiredBefore=2026-10-16T13%3A00%3A00Z`. No body or idempotency
+key is added. The cutoff must include a timezone and must not be later than the
+backend clock (`400 INVALID_REQUEST`). Under the same environment row lock, a
+**new** guarded deletion requires `expiresAt <= expiredBefore` and `READY` or
+`FAILED`; otherwise it returns `409 ENVIRONMENT_STATE_CONFLICT`. An active
+`DELETING` operation is reused. `DELETE_FAILED` never starts a new operation via
+this guarded route, even if another deletion fails between the client's recheck
+and submission. The unguarded portal/manual retry contract is unchanged.
+
+The CLI never retries DELETE; ambiguous responses trigger bounded detail reads
+to recover the operation ID or report a failure/unknown outcome. Use operation
+detail/history to verify completion; a 202 only requests deletion. The CLI
+requires this backend revision so the guard is enforced.
+
 The worker verifies the canonical namespace and platform/environment ownership
 in both labels and annotations before removal. New namespaces also carry an
 original create-operation marker, which must match in both places if either is
@@ -124,7 +144,9 @@ inside it, not the PostgreSQL environment or operation history.
 `page` is a zero-based integer, defaults to `0`, and is bounded to
 `0`–`1000000`; `size` defaults to `20` and is bounded to `1`–`100`.
 Items are ordered by `createdAt DESC, id DESC`. Items and totals are read
-from a consistent database snapshot. A valid page beyond the last page returns an empty
+from a consistent database snapshot **per request**, not across multiple pages.
+Concurrent inserts can shift offset pages; cleanup deduplicates but cannot promise
+run-wide snapshot completeness. A valid page beyond the last page returns an empty
 `items` array with the actual totals. No status filter is implemented.
 
 `GET /api/v1/environments/{id}` returns `200 OK` and an environment DTO:
