@@ -13,8 +13,11 @@ final class WorkerKubernetesClient {
         if ("in-cluster".equals(mode)) {
             try {
                 return LocalKubernetesClient.build(InClusterKubernetesClient.configuration());
+            } catch (ProvisioningException exception) {
+                throw exception;
             } catch (Exception ignored) {
-                throw InClusterKubernetesClient.invalid();
+                throw new ProvisioningException("KUBERNETES_CLIENT_INITIALIZATION_FAILED",
+                        "The in-cluster Kubernetes client could not be initialized.", false);
             }
         }
         throw new ProvisioningException("KUBERNETES_CONFIG_INVALID",

@@ -53,6 +53,50 @@ class WorkerKubernetesClientTests {
     }
 
     @Test
+    void preservesProjectedCredentialFailureWithoutAttemptingClientConstruction() {
+        var failure = InClusterKubernetesClient.invalid();
+        try (var local = mockStatic(LocalKubernetesClient.class);
+                var inCluster = mockStatic(InClusterKubernetesClient.class)) {
+            inCluster.when(InClusterKubernetesClient::configuration).thenThrow(failure);
+            assertSame(failure, assertThrows(ProvisioningException.class,
+                    () -> WorkerKubernetesClient.open("in-cluster", null)));
+            local.verifyNoInteractions();
+        }
+    }
+
+    @Test
+    void preservesProvisioningFailuresDuringClientConstruction() {
+        try (var local = mockStatic(LocalKubernetesClient.class);
+                var inCluster = mockStatic(InClusterKubernetesClient.class)) {
+            Config projected = Config.empty();
+            var failure = new ProvisioningException("KUBERNETES_CONFIG_INVALID",
+                    "A validated configuration is required.", false);
+            inCluster.when(InClusterKubernetesClient::configuration).thenReturn(projected);
+            local.when(() -> LocalKubernetesClient.build(projected)).thenThrow(failure);
+            assertSame(failure, assertThrows(ProvisioningException.class,
+                    () -> WorkerKubernetesClient.open("in-cluster", null)));
+        }
+    }
+
+    @Test
+    void sanitizesUnrelatedClientConstructionFailuresWithoutMisreportingMissingCredentials() {
+        try (var local = mockStatic(LocalKubernetesClient.class);
+                var inCluster = mockStatic(InClusterKubernetesClient.class)) {
+            Config projected = Config.empty();
+            inCluster.when(InClusterKubernetesClient::configuration).thenReturn(projected);
+            local.when(() -> LocalKubernetesClient.build(projected))
+                    .thenThrow(new IllegalStateException("private-transport-details-and-credentials"));
+            var error = assertThrows(ProvisioningException.class,
+                    () -> WorkerKubernetesClient.open("in-cluster", null));
+            assertEquals("KUBERNETES_CLIENT_INITIALIZATION_FAILED", error.code());
+            assertEquals("The in-cluster Kubernetes client could not be initialized.", error.getMessage());
+            assertFalse(error.retryable());
+            assertNull(error.getCause());
+            assertEquals(0, error.getSuppressed().length);
+        }
+    }
+
+    @Test
     void rejectsUnknownEmptyAndNonExactModesWithoutOpeningAnyCredentials() {
         try (var local = mockStatic(LocalKubernetesClient.class);
                 var inCluster = mockStatic(InClusterKubernetesClient.class)) {
