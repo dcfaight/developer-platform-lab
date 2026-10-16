@@ -218,6 +218,15 @@ developer-platform-lab/
 
 This is a planned structure. Directories will be introduced as their functionality is implemented.
 
+### Initial scaffold
+
+The directories above now have starter files or explicit placeholders.
+The backend base package is `io.github.dcfaight.platformlab`.
+The frontend renders a static page, and the backend starts without database
+or cluster access. API routes, persistence, workers, cleanup, and the sample
+workload remain unimplemented. Area README files describe the current scope.
+`docs/decisions/` and `docs/runbooks/` are reserved for future operational documentation.
+
 ## 8. Domain Model
 
 ### Environment
@@ -428,6 +437,59 @@ The intended workflow is:
 Executable commands will be added and verified during implementation.
 
 Until authentication and additional hardening exist, run this project only in a trusted local environment. Do not expose it publicly.
+
+### Scaffold quick start (available now)
+
+Prerequisites: Node.js 24 with npm 11, Java 17, and Python 3.12.
+The backend includes Maven Wrapper; a global Maven installation is not required.
+Frontend dependencies are pinned in `frontend/package-lock.json`, and the
+Spring Boot and Maven versions are pinned in the backend build files.
+Docker with Compose is needed only for PostgreSQL; Docker, kind, and kubectl
+are needed for the optional local cluster.
+
+From the repository root, prepare local PostgreSQL:
+
+```sh
+cp .env.example .env
+# Edit .env and set POSTGRES_PASSWORD to a nonempty local-only value.
+docker compose up -d --wait postgres
+```
+
+Run the apps in separate terminals:
+
+```sh
+cd backend
+./mvnw spring-boot:run
+```
+
+```sh
+cd frontend
+npm ci
+npm run dev
+```
+
+The portal is at http://localhost:5173. The backend listens on
+http://127.0.0.1:8080 but has no API routes yet (404 responses are expected).
+Neither starter uses PostgreSQL yet; starting Compose is optional for now.
+Compose reads `.env`; the backend does not load it automatically.
+See [infra/README.md](infra/README.md) for the optional kind cluster.
+There is no sample image to build or environment workflow to run yet.
+
+Scaffold checks from the repository root (also run by CI):
+
+```sh
+npm --prefix frontend ci
+npm --prefix frontend run lint
+npm --prefix frontend run build
+(cd backend && ./mvnw verify)
+python -m compileall -q automation
+docker compose config --quiet
+```
+
+The Compose check requires the configured password in `.env`.
+On Windows use `mvnw.cmd` in place of `./mvnw`.
+Stop PostgreSQL with `docker compose down`; data persists in a named volume.
+Use `docker compose down --volumes` only when intentionally discarding local data.
 
 ## 15. Testing Strategy
 
