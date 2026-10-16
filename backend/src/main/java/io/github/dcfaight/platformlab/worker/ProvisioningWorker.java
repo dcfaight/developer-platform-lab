@@ -2,12 +2,16 @@ package io.github.dcfaight.platformlab.worker;
 
 import io.github.dcfaight.platformlab.environment.EnvironmentRepository;
 import io.github.dcfaight.platformlab.kubernetes.EnvironmentProvisioner;
+import io.github.dcfaight.platformlab.kubernetes.OperationProgress;
+import io.github.dcfaight.platformlab.kubernetes.OperationProgress.Milestone;
 import io.github.dcfaight.platformlab.kubernetes.ProvisioningException;
 import java.time.Duration;
+import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -43,7 +47,8 @@ public class ProvisioningWorker {
                     if (!operations.owns(claim)) {
                         return;
                     }
-                    if (provisioner.delete(environment, claim.createOperationId(), () -> {
+                    milestone(claim, Milestone.DELETION_STARTED);
+                    if (provisioner.delete(environment, claim.createOperationId(), progress(claim, () -> {
                         if (!operations.owns(claim)) {
                             return false;
                         }
@@ -53,7 +58,7 @@ public class ProvisioningWorker {
                                     "Deletion did not complete within its attempt limits.", false);
                         }
                         return true;
-                    })) {
+                    }))) {
                         operations.succeed(claim);
                     } else {
                         operations.deletionWaiting(claim, properties.readinessPollInterval());
@@ -64,7 +69,8 @@ public class ProvisioningWorker {
                     if (!operations.owns(claim)) {
                         return;
                     }
-                    provisioner.provision(environment, claim.id(), () -> {
+                    milestone(claim, Milestone.PROVISIONING_STARTED);
+                    provisioner.provision(environment, claim.id(), progress(claim, () -> {
                         if (!operations.owns(claim)) {
                             return false;
                         }
@@ -74,7 +80,7 @@ public class ProvisioningWorker {
                                     "Provisioning did not complete within its attempt limits.", false);
                         }
                         return true;
-                    });
+                    }));
                     if (!operations.provisioned(claim)) {
                         return;
                     }
@@ -102,5 +108,29 @@ public class ProvisioningWorker {
                 throw new IllegalStateException("Internal environment operation failure for operation " + claim.id());
             }
         });
+    }
+
+    private OperationProgress progress(WorkerRepository.Claim claim, BooleanSupplier leaseValid) {
+        return new OperationProgress() {
+            @Override
+            public boolean getAsBoolean() {
+                return leaseValid.getAsBoolean();
+            }
+
+            @Override
+            public void milestone(Milestone milestone) {
+                ProvisioningWorker.this.milestone(claim, milestone);
+            }
+        };
+    }
+
+    private void milestone(WorkerRepository.Claim claim, Milestone milestone) {
+        // Timeline events are observability only; a failed write must not fail Kubernetes work.
+        try {
+            operations.progress(claim, milestone);
+        } catch (DataAccessException failure) {
+            LOG.warn("Could not record environment operation milestone code={} operationId={} exceptionType={}",
+                    milestone.name(), claim.id(), failure.getClass().getName());
+        }
     }
 }

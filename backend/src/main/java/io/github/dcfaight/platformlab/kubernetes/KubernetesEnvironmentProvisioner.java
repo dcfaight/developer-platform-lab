@@ -10,10 +10,10 @@ import io.fabric8.kubernetes.api.model.apps.DeploymentBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.github.dcfaight.platformlab.environment.EnvironmentRepository.EnvironmentRecord;
+import io.github.dcfaight.platformlab.kubernetes.OperationProgress.Milestone;
 import jakarta.annotation.PreDestroy;
 import java.util.Map;
 import java.util.UUID;
-import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -52,7 +52,7 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
     }
 
     @Override
-    public void provision(EnvironmentRecord environment, UUID createOperationId, BooleanSupplier leaseValid) {
+    public void provision(EnvironmentRecord environment, UUID createOperationId, OperationProgress leaseValid) {
         execute(() -> {
             validate(environment);
             Namespace namespace = client.namespaces().withName(environment.namespace()).get();
@@ -68,6 +68,7 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
                         .withNewMetadata().withName(environment.namespace())
                         .withLabels(labels).withAnnotations(labels)
                         .endMetadata().build()).create();
+                leaseValid.milestone(Milestone.NAMESPACE_CREATED);
             }
             requireOwned(namespace, environment);
             if (createOperationId != null) {
@@ -81,6 +82,7 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
                     return null;
                 }
                 client.apps().deployments().inNamespace(environment.namespace()).resource(desired).create();
+                leaseValid.milestone(Milestone.WORKLOAD_CREATED);
             } else {
                 requireOwned(existing, environment);
                 if (!desired.getSpec().equals(existing.getSpec())) {
@@ -98,7 +100,7 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
     }
 
     @Override
-    public boolean delete(EnvironmentRecord environment, UUID createOperationId, BooleanSupplier leaseValid) {
+    public boolean delete(EnvironmentRecord environment, UUID createOperationId, OperationProgress leaseValid) {
         return execute(() -> {
             validate(environment);
             if (createOperationId == null) {
@@ -140,6 +142,7 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
                 }
                 throw exception;
             }
+            leaseValid.milestone(Milestone.NAMESPACE_DELETE_REQUESTED);
             // An accepted DELETE is not completion: finalizers can keep the namespace alive.
             return false;
         });

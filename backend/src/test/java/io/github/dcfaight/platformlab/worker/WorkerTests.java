@@ -106,7 +106,8 @@ class WorkerTests {
         worker.poll();
         assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
         assertEquals("READY", environmentStatus(id));
-        assertEquals(List.of("CLAIMED", "PROVISIONED", "SUCCEEDED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROGRESS", "PROVISIONED", "SUCCEEDED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROVISIONING_STARTED", "PROVISIONED", "ENVIRONMENT_READY"), eventCodes(id));
         assertTrue(operations.events(id).stream().allMatch(event -> event.createdAt() != null));
         worker.poll();
         verify(provisioner, times(1)).provision(any(), any(), any());
@@ -176,9 +177,61 @@ class WorkerTests {
         assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
         assertEquals("READY", environmentStatus(id));
         assertEquals(properties.maxAttempts() + 1, operations.find(id).orElseThrow().attemptCount());
-        assertEquals("LEASE_RECOVERED", operations.events(id).get(properties.maxAttempts()).code());
+        assertEquals("LEASE_RECOVERED", operations.events(id).get(properties.maxAttempts() + 1).code());
+        assertEquals(1, eventCodes(id).stream().filter("PROVISIONING_STARTED"::equals).count());
         worker.poll();
         verify(provisioner, times(2)).provision(any(), eq(id), any());
+    }
+
+    @Test
+    void provisionerMilestonesAreRecordedInOrderOnceAndTraceToTheOperation() {
+        UUID id = create();
+        doAnswer(invocation -> {
+            var progress = (io.github.dcfaight.platformlab.kubernetes.OperationProgress) invocation.getArgument(2);
+            progress.milestone(io.github.dcfaight.platformlab.kubernetes.OperationProgress.Milestone.NAMESPACE_CREATED);
+            progress.milestone(io.github.dcfaight.platformlab.kubernetes.OperationProgress.Milestone.NAMESPACE_CREATED);
+            progress.milestone(io.github.dcfaight.platformlab.kubernetes.OperationProgress.Milestone.WORKLOAD_CREATED);
+            return null;
+        }).when(provisioner).provision(any(), any(), any());
+        when(provisioner.isReady(any())).thenReturn(true);
+        worker.poll();
+        assertEquals(List.of("CLAIMED", "PROVISIONING_STARTED", "NAMESPACE_CREATED", "WORKLOAD_CREATED",
+                "PROVISIONED", "ENVIRONMENT_READY"), eventCodes(id));
+        var correlation = operations.find(id).orElseThrow().correlationId();
+        var events = operations.events(id);
+        for (int i = 1; i < events.size(); i++) {
+            assertFalse(events.get(i).createdAt().isBefore(events.get(i - 1).createdAt()));
+        }
+        assertTrue(events.stream().allMatch(event -> java.util.Objects.equals(correlation, event.correlationId())));
+        assertEquals("Kubernetes accepted the environment namespace.", events.get(2).message());
+    }
+
+    @Test
+    void milestonesAreFencedByTheLeaseAndOncePerOperation() {
+        UUID id = create();
+        var stale = repository.claim(properties).orElseThrow();
+        var milestone = io.github.dcfaight.platformlab.kubernetes.OperationProgress.Milestone.PROVISIONING_STARTED;
+        assertTrue(repository.progress(stale, milestone));
+        assertFalse(repository.progress(stale, milestone));
+        expire(id);
+        assertFalse(repository.progress(stale, io.github.dcfaight.platformlab.kubernetes.OperationProgress
+                .Milestone.NAMESPACE_CREATED));
+        var recovered = repository.claim(properties).orElseThrow();
+        assertFalse(repository.progress(recovered, milestone));
+        assertEquals(List.of("CLAIMED", "PROVISIONING_STARTED", "LEASE_RECOVERED"), eventCodes(id));
+    }
+
+    @Test
+    void milestoneRecordingFailureDoesNotDisturbProvisioning() {
+        UUID id = create();
+        var failing = spy(new WorkerRepository(jdbc));
+        doThrow(new org.springframework.dao.DataAccessResourceFailureException("unavailable"))
+                .when(failing).progress(any(), any());
+        when(provisioner.isReady(any())).thenReturn(true);
+        worker = new ProvisioningWorker(failing, environments, provisioner, properties);
+        worker.poll();
+        assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
+        assertEquals(List.of("CLAIMED", "PROVISIONED", "SUCCEEDED"), eventTypes(id));
     }
 
     @Test
@@ -247,7 +300,7 @@ class WorkerTests {
         assertEquals("FAILED", operations.find(id).orElseThrow().status());
         assertEquals(3, operations.find(id).orElseThrow().attemptCount());
         assertEquals("KUBERNETES_UNAVAILABLE", operations.find(id).orElseThrow().failureCode());
-        assertEquals(List.of("CLAIMED", "RETRY", "CLAIMED", "RETRY", "CLAIMED", "FAILED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROGRESS", "RETRY", "CLAIMED", "RETRY", "CLAIMED", "FAILED"), eventTypes(id));
     }
 
     @Test
@@ -262,7 +315,7 @@ class WorkerTests {
         assertEquals("FAILED", operations.find(id).orElseThrow().status());
         assertEquals("FAILED", environmentStatus(id));
         assertTrue(repository.claim(properties).isEmpty());
-        assertEquals(List.of("CLAIMED", "FAILED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROGRESS", "FAILED"), eventTypes(id));
     }
 
     @Test
@@ -293,7 +346,7 @@ class WorkerTests {
         worker.poll();
         assertEquals("RUNNING", operations.find(id).orElseThrow().status());
         assertEquals("PROVISIONING", environmentStatus(id));
-        assertEquals(List.of("CLAIMED", "PROVISIONED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROGRESS", "PROVISIONED"), eventTypes(id));
         when(provisioner.isReady(any())).thenReturn(true);
         worker.poll();
         assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
@@ -336,7 +389,7 @@ class WorkerTests {
         assertEquals("FAILED", operation.status());
         assertEquals("INTERNAL_ERROR", operation.failureCode());
         assertEquals("An internal provisioning error occurred.", operation.failureMessage());
-        assertEquals(List.of("CLAIMED", "FAILED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROGRESS", "FAILED"), eventTypes(id));
     }
 
     @Test
@@ -364,6 +417,9 @@ class WorkerTests {
         verify(provisioner, never()).provision(any(), any(), any());
         verify(provisioner, times(3)).delete(any(), eq(createId), any());
         assertEquals(1, operations.find(id).orElseThrow().attemptCount());
+        assertEquals(1, eventCodes(id).stream().filter("DELETION_STARTED"::equals).count());
+        assertEquals("DELETION_STARTED", eventCodes(id).get(1));
+        assertEquals("ENVIRONMENT_DELETED", eventCodes(id).get(eventCodes(id).size() - 1));
     }
 
     @Test
@@ -467,7 +523,7 @@ class WorkerTests {
         }
         assertEquals("FAILED", operations.find(id).orElseThrow().status());
         assertEquals("DELETE_FAILED", environmentStatus(id));
-        assertEquals(List.of("CLAIMED", "RETRY", "CLAIMED", "RETRY", "CLAIMED", "FAILED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROGRESS", "RETRY", "CLAIMED", "RETRY", "CLAIMED", "FAILED"), eventTypes(id));
         UUID environmentId = operations.find(id).orElseThrow().environmentId();
         var retry = service.delete(environmentId, "worker-test");
         assertNotEquals(id, retry.operationId());
@@ -540,11 +596,12 @@ class WorkerTests {
         worker.poll();
         assertEquals("RUNNING", operations.find(id).orElseThrow().status());
         assertEquals("DELETING", environmentStatus(id));
-        assertEquals(List.of("CLAIMED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROGRESS"), eventTypes(id));
         doReturn(true).when(provisioner).delete(any(), any(), any());
         worker.poll();
         assertEquals("DELETED", environmentStatus(id));
-        assertEquals(List.of("CLAIMED", "CLAIMED", "SUCCEEDED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "PROGRESS", "CLAIMED", "SUCCEEDED"), eventTypes(id));
+        assertEquals(List.of("CLAIMED", "DELETION_STARTED", "LEASE_RECOVERED", "ENVIRONMENT_DELETED"), eventCodes(id));
     }
 
     @Test
@@ -608,5 +665,9 @@ class WorkerTests {
 
     private List<String> eventTypes(UUID id) {
         return operations.events(id).stream().map(OperationRepository.OperationEvent::type).toList();
+    }
+
+    private List<String> eventCodes(UUID id) {
+        return operations.events(id).stream().map(OperationRepository.OperationEvent::code).toList();
     }
 }

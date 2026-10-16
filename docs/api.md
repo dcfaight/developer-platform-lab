@@ -5,7 +5,8 @@ Requests are accepted separately from infrastructure readiness. An opt-in worker
 provisions and deletes the approved sample's owned namespace in local kind and
 exposes progress in operation detail. A manually invoked, dry-run-first
 [expiration CLI](../automation/README.md) uses the delete API; there is no cleanup
-daemon or environment events endpoint. The broader
+daemon. Operation timelines are embedded in operation detail/history, and
+aggregate counts and timings are available from [operation metrics](#read-operation-metrics). The broader
 [blueprint](../README.md#9-proposed-rest-api) describes future behavior.
 
 ## Create an environment
@@ -247,8 +248,32 @@ summaries, not Kubernetes response bodies, kubeconfig contents, or stack traces.
 | `correlationId` | Server-generated ID of the original acceptance request; older migrated records may have `null`. A replay has its own response `X-Request-Id` without replacing this original correlation. |
 | `events` | Ordered, durable worker events with `type`, `code`, `message`, `correlationId`, and UTC `createdAt`. No raw Kubernetes event/log stream is returned. |
 
-Event types include `CLAIMED`, `PROVISIONED`, `WAITING`, `RETRY`, `SUCCEEDED`,
-and `FAILED`. Each state change and its event commit atomically. Readiness waits
+Event types include `CLAIMED`, `PROGRESS`, `PROVISIONED`, `WAITING`, `RETRY`,
+`SUCCEEDED`, and `FAILED`. Each state change and its event commit atomically.
+Every event carries the operation's original request `correlationId`; the
+operation and environment IDs come from the enclosing operation.
+
+The operation timeline uses these codes for key lifecycle milestones:
+
+| Type | Code | Recorded when |
+|---|---|---|
+| `CLAIMED` | `CLAIMED` / `LEASE_RECOVERED` | A worker acquires the operation, or reclaims it after a previous lease expired. |
+| `PROGRESS` | `PROVISIONING_STARTED` | The worker begins creating environment resources. |
+| `PROGRESS` | `NAMESPACE_CREATED` | Kubernetes accepted the environment namespace. |
+| `PROGRESS` | `WORKLOAD_CREATED` | Kubernetes accepted the `sample-service` Deployment. |
+| `PROVISIONED` | `PROVISIONED` | All resources exist; readiness polling begins. |
+| `SUCCEEDED` | `ENVIRONMENT_READY` | The workload is ready (create). |
+| `PROGRESS` | `DELETION_STARTED` | The worker begins deleting the namespace. |
+| `PROGRESS` | `NAMESPACE_DELETE_REQUESTED` | Kubernetes accepted the guarded namespace DELETE. |
+| `SUCCEEDED` | `ENVIRONMENT_DELETED` | The namespace is confirmed absent (delete). |
+| `WAITING` / `RETRY` / `FAILED` | see codes below | Readiness/absence waits, transient retries, and terminal failures. |
+
+`PROGRESS` milestones are lease-fenced, recorded at most once per operation, and
+best-effort: a failure to record one never fails the Kubernetes work. Recovered
+operations that find resources already present do not repeat Kubernetes
+milestones. Successes recorded before this release keep the legacy `SUCCEEDED` code.
+The worker also logs each recorded event as one structured line
+(`event`, `code`, `operationId`, `environmentId`, `operationType`), never messages or credentials. Readiness waits
 are separate from transient failure retries; they do not exhaust the error budget.
 `READINESS_TIMEOUT` and `ATTEMPTS_EXHAUSTED` report bounded execution/recovery
 limits. No lease tokens or Kubernetes credentials are exposed.
@@ -274,6 +299,55 @@ taking further action. After a failed create, deletion can clean up partial reso
 after `DELETE_FAILED`, the portal/manual DELETE can request a new deletion operation.
 There is no create-operation retry endpoint. Older persisted failures retain their
 original codes/messages; new classifications apply to subsequent worker failures.
+
+## Read operation metrics
+
+`GET /api/v1/operations/metrics` returns `200 OK` with a point-in-time summary
+computed from durable PostgreSQL state. Values therefore survive backend restarts
+and are the same on every replica, whether or not that replica runs the worker:
+
+```json
+{
+  "generatedAt": "2026-10-16T05:10:00Z",
+  "workerEnabled": true,
+  "operations": [
+    {
+      "type": "CREATE_ENVIRONMENT",
+      "pending": 1, "running": 0, "succeeded": 12, "failed": 1,
+      "averageQueueSeconds": 0.42,
+      "succeededDuration": {"count": 12, "averageSeconds": 21.3, "p95Seconds": 34.8, "maxSeconds": 36.1}
+    },
+    {
+      "type": "DELETE_ENVIRONMENT",
+      "pending": 0, "running": 0, "succeeded": 0, "failed": 0,
+      "averageQueueSeconds": null,
+      "succeededDuration": {"count": 0, "averageSeconds": null, "p95Seconds": null, "maxSeconds": null}
+    }
+  ],
+  "worker": {
+    "dueOperations": 1,
+    "expiredLeases": 0,
+    "oldestDueAt": "2026-10-16T05:09:58Z",
+    "lastEventAt": "2026-10-16T05:09:41Z"
+  },
+  "failureCodes": [{"code": "KUBERNETES_FORBIDDEN", "count": 1}]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `workerEnabled` | Whether *this* backend replica runs the worker (`platform.worker.enabled`). |
+| `operations[]` | One entry per operation type, always both types. `pending` includes readiness/absence waits and scheduled retries. |
+| `averageQueueSeconds` | Mean time from acceptance to first claim for started operations; `null` if none started. |
+| `succeededDuration` | End-to-end acceptance-to-completion seconds for `SUCCEEDED` operations; statistics are `null` when `count` is 0. |
+| `worker.dueOperations` | `PENDING` operations claimable now. A steadily growing value means no healthy worker is polling. |
+| `worker.expiredLeases` | `RUNNING` operations whose lease expired, which usually means a worker stopped or crashed mid-operation. They are reclaimed automatically. |
+| `worker.oldestDueAt` | Earliest due time among claimable work; an old value indicates a stalled worker. `null` when nothing is due. |
+| `worker.lastEventAt` | Most recent operation event; a coarse worker activity signal. |
+| `failureCodes` | Terminal `FAILED` operation counts by sanitized failure code (top 20). |
+
+Like the other reads, this route is anonymous (trusted-local) and exposes no
+environment names, lease tokens, or credentials.
 
 Both detail routes require UUID identifiers. A malformed identifier returns
 `400`; a valid UUID with no record returns `404`.

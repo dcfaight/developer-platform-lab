@@ -271,6 +271,34 @@ class KubernetesEnvironmentProvisionerTests {
     }
 
     @Test
+    void milestonesAreReportedOnlyAfterKubernetesAcceptsEachWrite() {
+        var milestones = new java.util.ArrayList<OperationProgress.Milestone>();
+        var progress = new OperationProgress() {
+            @Override
+            public boolean getAsBoolean() {
+                return true;
+            }
+
+            @Override
+            public void milestone(Milestone milestone) {
+                milestones.add(milestone);
+            }
+        };
+        provisioner.provision(environment, createOperationId, progress);
+        assertEquals(java.util.List.of(OperationProgress.Milestone.NAMESPACE_CREATED,
+                OperationProgress.Milestone.WORKLOAD_CREATED), milestones);
+        provisioner.provision(environment, createOperationId, progress);
+        assertEquals(2, milestones.size(), "Observing existing resources is not a new milestone");
+
+        assertFalse(provisioner.delete(environment, createOperationId, progress));
+        assertEquals(OperationProgress.Milestone.NAMESPACE_DELETE_REQUESTED, milestones.get(2));
+        assertFalse(provisioner.delete(environment, createOperationId, progress));
+        namespace = null;
+        assertTrue(provisioner.delete(environment, createOperationId, progress));
+        assertEquals(3, milestones.size(), "Polling a terminating or absent namespace is not a new milestone");
+    }
+
+    @Test
     void restartAfterAcceptedDeletionOnlyObservesUntilNamespaceIsAbsent() {
         provisioner.provision(environment, createOperationId);
         assertFalse(provisioner.delete(environment, createOperationId, () -> true));

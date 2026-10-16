@@ -25,7 +25,9 @@ http://127.0.0.1:8080. No CORS changes or frontend credentials are needed.
   reloads and browser back/forward navigation without a router dependency.
 - Operation state, recorded progress step, attempt count, lifecycle/lease/retry
   timestamps, sanitized failure summaries, request correlation IDs, and durable
-  progress events in oldest-first backend order with event counts. Progress is
+  progress events in oldest-first backend order with event counts. Lifecycle
+  milestones are titled by their code, each event shows time elapsed since
+  acceptance, and completed operations show a total duration. Progress is
   not an invented percentage.
 - Loading, empty, unavailable/not-found, and retry states. Views refresh every
   10 seconds after a request finishes; Refresh retries immediately. A failed

@@ -2,6 +2,7 @@ package io.github.dcfaight.platformlab.operation;
 
 import io.github.dcfaight.platformlab.config.ApiException;
 import io.github.dcfaight.platformlab.config.ApiIds;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -15,8 +16,18 @@ import org.springframework.transaction.annotation.Isolation;
 public class OperationController {
     private final OperationRepository operations;
 
-    public OperationController(OperationRepository operations) {
+    private final boolean workerEnabled;
+
+    public OperationController(OperationRepository operations,
+            @Value("${platform.worker.enabled:false}") boolean workerEnabled) {
         this.operations = operations;
+        this.workerEnabled = workerEnabled;
+    }
+
+    @GetMapping("/metrics")
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public OperationMetrics metrics() {
+        return operations.metrics(workerEnabled);
     }
 
     @GetMapping("/{id}")

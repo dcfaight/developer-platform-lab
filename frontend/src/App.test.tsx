@@ -361,6 +361,24 @@ describe('portal', () => {
     expect(await screen.findByRole('link', { name: demoEnvironment.name })).toBeTruthy()
   })
 
+  it('renders lifecycle milestones with elapsed timing and total duration', async () => {
+    window.history.replaceState(null, '', `/#environment/${demoEnvironment.id}`)
+    const at = (seconds: number) => new Date(Date.parse(demoOperation.createdAt) + seconds * 1000).toISOString()
+    const event = (type: string, code: string, seconds: number) => ({ type, code, message: `${code} message`,
+      correlationId: demoOperation.correlationId, createdAt: at(seconds) })
+    mockPortal({ ...demoOperation, status: 'SUCCEEDED', progressStep: 'READY', completedAt: at(95),
+      events: [event('CLAIMED', 'CLAIMED', 1), event('PROGRESS', 'NAMESPACE_CREATED', 2),
+        event('PROGRESS', 'WORKLOAD_CREATED', 3), event('SUCCEEDED', 'ENVIRONMENT_READY', 95)] })
+    render(<App />)
+    const card = await screen.findByRole('article', { name: `Operation ${demoOperation.id}` })
+    const titles = [...card.querySelectorAll('.timeline strong')].map((title) => title.textContent)
+    expect(titles).toEqual(['CLAIMED', 'NAMESPACE CREATED', 'WORKLOAD CREATED', 'SUCCEEDED'])
+    expect(within(card).getByText('WORKLOAD_CREATED')).toBeTruthy()
+    expect(within(card).getByText('+3s after acceptance')).toBeTruthy()
+    expect(within(card).getByText('+1m 35s after acceptance')).toBeTruthy()
+    expect(within(card).getByText('Total duration').nextElementSibling?.textContent).toBe('1m 35s')
+  })
+
   it.each(['PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED'])(
     'renders %s operations and safely displays sanitized message fields', async (status) => {
       window.history.replaceState(null, '', `/#environment/${demoEnvironment.id}`)

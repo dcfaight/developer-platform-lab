@@ -2,6 +2,7 @@ package io.github.dcfaight.platformlab.operation;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.github.dcfaight.platformlab.kubernetes.OperationProgress.Milestone;
 import io.github.dcfaight.platformlab.security.TestUsers;
 import io.github.dcfaight.platformlab.worker.WorkerProperties;
 import io.github.dcfaight.platformlab.worker.WorkerRepository;
@@ -11,6 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.UUID;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -41,6 +43,11 @@ class OperationStatusTests {
     @Autowired WorkerRepository worker;
     @Autowired ObjectMapper mapper;
     @Autowired JdbcTemplate jdbc;
+
+    @AfterEach
+    void isolate() {
+        jdbc.execute("TRUNCATE audit_events, idempotency_requests, operation_events, operations, environments CASCADE");
+    }
 
     @Test
     void statusContainsDurableFailureProgressEventsAndOriginalRequestCorrelation() throws Exception {
@@ -155,6 +162,91 @@ class OperationStatusTests {
         var otherHistory = mapper.readTree(get(client, "/api/v1/environments/" + otherId + "/operations").body());
         assertEquals(1, otherHistory.path("totalElements").asInt());
         assertEquals(otherId, otherHistory.path("items").get(0).path("environmentId").asText());
+    }
+
+    @Test
+    void timelineAndMetricsExposeLifecycleMilestonesCountsAndDurations() throws Exception {
+        var client = HttpClient.newHttpClient();
+        var properties = new WorkerProperties(Duration.ofSeconds(30), 5, Duration.ofSeconds(2),
+                Duration.ofSeconds(5), Duration.ofMinutes(5));
+        UUID ready = accept(client, "metrics-ready");
+        var claim = worker.claim(properties).orElseThrow();
+        assertTrue(worker.progress(claim, Milestone.PROVISIONING_STARTED));
+        assertTrue(worker.progress(claim, Milestone.NAMESPACE_CREATED));
+        assertTrue(worker.progress(claim, Milestone.WORKLOAD_CREATED));
+        assertTrue(worker.provisioned(claim));
+        assertTrue(worker.succeed(claim));
+        accept(client, "metrics-failed");
+        var failed = worker.claim(properties).orElseThrow();
+        assertTrue(worker.fail(failed, "KUBERNETES_FORBIDDEN", "Kubernetes access was denied."));
+        accept(client, "metrics-pending");
+
+        var operation = mapper.readTree(get(client, "/api/v1/operations/" + ready).body());
+        var types = new java.util.ArrayList<String>();
+        var codes = new java.util.ArrayList<String>();
+        operation.path("events").forEach(event -> {
+            types.add(event.path("type").asText());
+            codes.add(event.path("code").asText());
+        });
+        assertEquals(java.util.List.of("CLAIMED", "PROGRESS", "PROGRESS", "PROGRESS", "PROVISIONED", "SUCCEEDED"),
+                types);
+        assertEquals(java.util.List.of("CLAIMED", "PROVISIONING_STARTED", "NAMESPACE_CREATED", "WORKLOAD_CREATED",
+                "PROVISIONED", "ENVIRONMENT_READY"), codes);
+        var history = mapper.readTree(get(client, "/api/v1/environments/"
+                + operation.path("environmentId").asText() + "/operations").body());
+        assertEquals(operation.path("events"), history.path("items").get(0).path("events"));
+
+        var response = get(client, "/api/v1/operations/metrics");
+        assertEquals(200, response.statusCode());
+        var metrics = mapper.readTree(response.body());
+        assertFalse(metrics.path("generatedAt").asText().isEmpty());
+        assertFalse(metrics.path("workerEnabled").asBoolean());
+        var create = metrics.path("operations").get(0);
+        assertEquals("CREATE_ENVIRONMENT", create.path("type").asText());
+        assertEquals(1, create.path("pending").asLong());
+        assertEquals(0, create.path("running").asLong());
+        assertEquals(1, create.path("succeeded").asLong());
+        assertEquals(1, create.path("failed").asLong());
+        assertTrue(create.path("averageQueueSeconds").asDouble() >= 0);
+        assertEquals(1, create.path("succeededDuration").path("count").asLong());
+        double average = create.path("succeededDuration").path("averageSeconds").asDouble();
+        assertTrue(average >= 0);
+        assertEquals(average, create.path("succeededDuration").path("p95Seconds").asDouble());
+        assertEquals(average, create.path("succeededDuration").path("maxSeconds").asDouble());
+        var delete = metrics.path("operations").get(1);
+        assertEquals("DELETE_ENVIRONMENT", delete.path("type").asText());
+        assertEquals(0, delete.path("pending").asLong() + delete.path("running").asLong()
+                + delete.path("succeeded").asLong() + delete.path("failed").asLong());
+        assertEquals(0, delete.path("succeededDuration").path("count").asLong());
+        assertTrue(delete.path("succeededDuration").path("averageSeconds").isNull());
+        assertTrue(delete.path("averageQueueSeconds").isNull());
+        assertEquals(1, metrics.path("worker").path("dueOperations").asLong());
+        assertEquals(0, metrics.path("worker").path("expiredLeases").asLong());
+        assertFalse(metrics.path("worker").path("oldestDueAt").isNull());
+        assertFalse(metrics.path("worker").path("lastEventAt").isNull());
+        assertEquals(1, metrics.path("failureCodes").size());
+        assertEquals("KUBERNETES_FORBIDDEN", metrics.path("failureCodes").get(0).path("code").asText());
+        assertEquals(1, metrics.path("failureCodes").get(0).path("count").asLong());
+
+        var running = worker.claim(properties).orElseThrow();
+        jdbc.update("UPDATE operations SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = ?",
+                running.id());
+        metrics = mapper.readTree(get(client, "/api/v1/operations/metrics").body());
+        assertEquals(1, metrics.path("operations").get(0).path("running").asLong());
+        assertEquals(0, metrics.path("worker").path("dueOperations").asLong());
+        assertEquals(1, metrics.path("worker").path("expiredLeases").asLong());
+        assertFalse(metrics.path("worker").path("oldestDueAt").isNull());
+    }
+
+    private UUID accept(HttpClient client, String key) throws Exception {
+        var accepted = client.send(HttpRequest.newBuilder(url("/api/v1/environments"))
+                .header("Content-Type", "application/json").header("Idempotency-Key", key)
+                .header("Authorization", TestUsers.basic(TestUsers.OPERATOR))
+                .POST(HttpRequest.BodyPublishers.ofString("""
+                        {"name":"Metrics","templateId":"sample-service","ttlHours":1}
+                        """)).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(202, accepted.statusCode());
+        return UUID.fromString(mapper.readTree(accepted.body()).path("operationId").asText());
     }
 
     private HttpResponse<String> get(HttpClient client, String path) throws Exception {
