@@ -73,6 +73,11 @@ small { display: block; margin-top: 6px; overflow-wrap: anywhere; }
 .retry-intent { margin: 18px 0; padding: 16px; border: 1px solid #526782; border-radius: 9px; background: #172338; }
 .retry-intent button { margin: 8px 10px 0 0; }
 .retry-intent p { overflow-wrap: anywhere; }
+.delete-environment { margin-top: 24px; }
+.delete-dialog { max-width: min(640px, calc(100% - 32px)); color: #dce5f4; background: #121c2d; border: 1px solid #80505a; border-radius: 14px; padding: 24px; overflow-wrap: anywhere; }
+.delete-dialog::backdrop { background: #000a; }
+.delete-dialog form { display: grid; gap: 20px; margin-top: 20px; }
+.delete-actions { display: flex; gap: 12px; justify-content: flex-end; flex-wrap: wrap; }
 .create-panel > form > button { justify-self: start; }
 .metadata { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 28px; margin: 20px 0; }
 .metadata dt { color: #a0afc6; font-size: .78rem; margin-bottom: 6px; }

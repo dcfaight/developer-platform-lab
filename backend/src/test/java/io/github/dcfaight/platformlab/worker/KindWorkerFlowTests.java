@@ -7,6 +7,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import io.github.dcfaight.platformlab.kubernetes.KindNamespaceAssertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -44,7 +45,7 @@ class KindWorkerFlowTests {
     @Autowired ObjectMapper mapper;
 
     @Test
-    void acceptedHttpRequestRunsThroughScheduledWorkerToRealKindReadiness() throws Exception {
+    void acceptedHttpRequestRunsThroughScheduledWorkerToRealKindReadinessAndDeletion() throws Exception {
         var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
         var accepted = client.send(HttpRequest.newBuilder(url("/api/v1/environments"))
                 .timeout(Duration.ofSeconds(10))
@@ -83,7 +84,30 @@ class KindWorkerFlowTests {
         System.out.println("KIND_HTTP_ENVIRONMENT " + environment);
         assertEquals("READY", environment.path("status").asText());
         assertEquals("env-" + environmentId.replace("-", ""), environment.path("namespace").asText());
-        // Keep the managed namespace available for inspection, as in the provisioner integration test.
+        var deletion = client.send(HttpRequest.newBuilder(url("/api/v1/environments/" + environmentId))
+                .timeout(Duration.ofSeconds(10)).DELETE().build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(202, deletion.statusCode(), deletion.body());
+        JsonNode deleteAcceptance = mapper.readTree(deletion.body());
+        assertEquals("DELETING", deleteAcceptance.path("environmentStatus").asText());
+        assertEquals("PENDING", deleteAcceptance.path("operationStatus").asText());
+        String deleteLocation = deletion.headers().firstValue("Location").orElseThrow();
+        deadline = System.nanoTime() + Duration.ofSeconds(120).toNanos();
+        do {
+            status = get(client, deleteLocation);
+            if ("SUCCEEDED".equals(status.path("status").asText())
+                    || "FAILED".equals(status.path("status").asText())) {
+                break;
+            }
+            Thread.sleep(500);
+        } while (System.nanoTime() < deadline);
+        System.out.println("KIND_HTTP_DELETE_OPERATION " + status);
+        assertEquals("SUCCEEDED", status.path("status").asText(), status::toString);
+        assertEquals("DELETE_ENVIRONMENT", status.path("type").asText());
+        assertEquals("DELETED", get(client, "/api/v1/environments/" + environmentId).path("status").asText());
+        assertEquals(2, get(client, "/api/v1/environments/" + environmentId + "/operations")
+                .path("totalElements").asInt());
+        assertEquals("SUCCEEDED", get(client, "/api/v1/operations/" + operationId).path("status").asText());
+        KindNamespaceAssertions.assertAbsent(environment.path("namespace").asText());
     }
 
     private JsonNode get(HttpClient client, String path) throws Exception {

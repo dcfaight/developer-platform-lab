@@ -2,8 +2,8 @@
 
 The persistent backend slice implements the routes below under `/api/v1`.
 Requests are accepted separately from infrastructure readiness. An opt-in worker
-provisions the approved sample in local kind and exposes progress in operation
-detail. There is no deletion, expiration cleanup, or environment events endpoint. The broader
+provisions and deletes the approved sample's owned namespace in local kind and
+exposes progress in operation detail. There is no expiration cleanup or environment events endpoint. The broader
 [blueprint](../README.md#9-proposed-rest-api) describes future behavior.
 
 ## Create an environment
@@ -61,6 +61,52 @@ the environment, operation, and audit event are written; no reservation
 completion update is needed. These writes commit or roll back together. Concurrent
 requests using one key cannot create duplicate environments or operations.
 
+## Delete an environment
+
+`DELETE /api/v1/environments/{id}` accepts no payload and needs no idempotency
+key. It returns `202 Accepted`, `Location: /api/v1/operations/{operationId}`, and:
+
+```json
+{
+  "environmentId": "99f42e18-bab9-40ad-83d1-85bc3f6378c0",
+  "operationId": "59a65a78-33a0-4bb0-9648-2722377f3d99",
+  "environmentStatus": "DELETING",
+  "operationStatus": "PENDING"
+}
+```
+
+Only `READY`, `FAILED`, or `DELETE_FAILED` records are eligible for a new delete.
+Creation must finish first. An environment row lock serializes concurrent
+submissions; repeating a pending/running delete returns that same operation
+(`operationStatus` may be `RUNNING`). Environment, operation, audit, and acceptance
+history are persisted together. No competing delete is created.
+
+Malformed IDs return `400`; unknown IDs return `404`. Already deleted records
+and conflicting lifecycle states are rejected, rather than starting new work.
+After a terminal `DELETE_FAILED`, an explicit new DELETE creates a new durable
+operation, preserving the failed attempt's history.
+
+The worker verifies the canonical namespace and platform/environment ownership
+in both labels and annotations before removal. New namespaces also carry an
+original create-operation marker, which must match in both places if either is
+present. Older owned namespaces with neither marker remain deletable using the
+original ownership checks; they are never relabeled or adopted. The persisted
+create operation must exist. The worker never deletes by prefix alone. Kubernetes deletion
+uses namespace identity/version preconditions to protect against replacement or
+ownership changes between inspection and deletion. A namespace already absent
+is success; a namespace still terminating is not. Finalizers are not stripped.
+The environment remains `DELETING` until absence is observed, then becomes
+`DELETED`; terminal failures become `DELETE_FAILED` with sanitized operation errors.
+Leases, bounded retries, and restart recovery apply to delete work too. This slice
+reuses `platform.worker.readiness-timeout` as the overall deletion deadline and
+`readiness-poll-interval` for namespace-absence polling.
+
+Ownership conflicts discovered in Kubernetes are asynchronous operation failures,
+not a claim that request acceptance validated live cluster ownership. These checks
+protect platform resources; they do **not** authenticate or authorize users.
+All callers remain trusted-local. Deletion removes the namespace and everything
+inside it, not the PostgreSQL environment or operation history.
+
 ## Read environments
 
 `GET /api/v1/environments?page=0&size=20` returns `200 OK`:
@@ -106,6 +152,7 @@ List `items` use this same DTO. The namespace is `env-` followed by the
 environment UUID with hyphens removed. Worker-enabled provisioning creates this
 namespace only if it is absent or already owned by this environment. Environment
 status progresses through `REQUESTED`, `PROVISIONING`, and `READY` or `FAILED`.
+Deletion adds `DELETING`, `DELETED`, and `DELETE_FAILED`.
 `latestOperation` is an additive read-only summary of the newest operation by
 `createdAt DESC, id DESC`, or `null` when none exists. `PENDING` and `RUNNING`
 indicate an active operation. This summary does not change creation responses.
@@ -122,8 +169,8 @@ Page/size defaults and bounds match the environment list. Items, events, and
 totals are read in one consistent database snapshot. An existing environment
 with no operations, or a page beyond the last, returns empty `items` with actual
 totals. Invalid identifiers/parameters return `400`; a missing environment
-returns `404`. History is scoped to the requested environment. No new write
-or provisioning behavior is introduced.
+returns `404`. History is scoped to the requested environment and includes both
+`CREATE_ENVIRONMENT` and `DELETE_ENVIRONMENT` operations.
 
 ## Read an operation
 
@@ -154,7 +201,7 @@ Timestamps are ISO-8601 instants. Initially `nextAttemptAt = createdAt`,
 `attemptCount = 0`, and the three nullable lifecycle timestamps are `null`.
 Operations transition from `PENDING` to `RUNNING`, then `SUCCEEDED` or `FAILED`.
 Transient failures return to `PENDING` with a future `nextAttemptAt`; expired
-`RUNNING` leases can be reclaimed. The acceptance response (including idempotent
+`RUNNING` leases can be reclaimed. The create acceptance response (including idempotent
 replays) always retains the original accepted states; poll this endpoint for
 the current state. `READY` is never inferred from request acceptance or merely
 creating Kubernetes objects.
@@ -166,8 +213,8 @@ summaries, not Kubernetes response bodies, kubeconfig contents, or stack traces.
 
 | Field | Meaning |
 |---|---|
-| `attemptCount` | Provisioning attempts, including reclaimed abandoned attempts; readiness-only polls do not increment it. |
-| `progressStep` | Current worker step, including `ACCEPTED`, `PROVISIONING`, `WAITING`, `RETRY`, `READY`, or `FAILED`. |
+| `attemptCount` | Execution attempts, including reclaimed abandoned attempts; create readiness-only polls do not increment it. |
+| `progressStep` | Current worker step, including `ACCEPTED`, `PROVISIONING`, `DELETING`, `WAITING`, `RETRY`, `READY`, `DELETED`, or `FAILED`. |
 | `failureCode`, `failureMessage` | Nullable sanitized last failure summary; retries can have a summary before reaching a terminal state. |
 | `correlationId` | Server-generated ID of the original acceptance request; older migrated records may have `null`. A replay has its own response `X-Request-Id` without replacing this original correlation. |
 | `events` | Ordered, durable worker events with `type`, `code`, `message`, `correlationId`, and UTC `createdAt`. No raw Kubernetes event/log stream is returned. |
@@ -187,6 +234,7 @@ Worker failure codes include:
 | `KUBERNETES_VALIDATION_FAILED` | Invalid persisted provisioning input; fail without provisioning. |
 | `KUBERNETES_OWNERSHIP_CONFLICT` | Resource is not an active, owned platform resource; never adopt it. |
 | `READINESS_TIMEOUT` | Initial provisioning did not reach readiness before its deadline. |
+| `DELETION_TIMEOUT` | Namespace absence was not confirmed before the deletion deadline. |
 | `ATTEMPTS_EXHAUSTED` | Recovered work exhausted its provisioning attempts. |
 | `INTERNAL_ERROR` | Unexpected failure with a fixed sanitized summary. |
 
@@ -216,6 +264,8 @@ Messages above are illustrative; clients should rely on stable codes:
 | `400` | `INVALID_REQUEST` | Malformed JSON, unknown fields, invalid input types, or malformed identifiers/parameters. |
 | `400` | `VALIDATION_ERROR` | Input fails required-field, format, or range constraints. |
 | `409` | `IDEMPOTENCY_CONFLICT` | Key already belongs to different normalized input. |
+| `409` | `ENVIRONMENT_STATE_CONFLICT` | Deletion conflicts with creation, another active operation, or an already deleted record. |
+| `409` | `INVALID_ENVIRONMENT_NAMESPACE` | Persisted namespace is not canonical; no deletion is accepted. |
 | `404` | `NOT_FOUND` | Requested record does not exist. |
 | `500` | `INTERNAL_ERROR` | Unexpected failure; internal details are not returned. |
 

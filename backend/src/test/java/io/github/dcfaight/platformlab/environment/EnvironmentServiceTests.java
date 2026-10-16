@@ -1,11 +1,13 @@
 package io.github.dcfaight.platformlab.environment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 import io.github.dcfaight.platformlab.audit.AuditRepository;
 import io.github.dcfaight.platformlab.environment.EnvironmentRepository.EnvironmentRecord;
@@ -15,6 +17,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
+import java.util.Optional;
+import java.util.UUID;
+import io.github.dcfaight.platformlab.config.ApiException;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -27,6 +32,21 @@ class EnvironmentServiceTests {
     @Test
     void fixedClockDeterminesExplicitMaximumTtlExpiry() {
         assertCreationTimestamps(24, 24);
+    }
+
+    @Test
+    void deletionRefusesNoncanonicalPersistedNamespaceBeforeWriting() {
+        var environments = mock(EnvironmentRepository.class);
+        var operations = mock(OperationRepository.class);
+        var idempotency = mock(IdempotencyRepository.class);
+        var audit = mock(AuditRepository.class);
+        UUID id = UUID.randomUUID();
+        Instant now = Instant.now();
+        when(environments.lock(id)).thenReturn(Optional.of(new EnvironmentRecord(id, "bad", "default",
+                "sample-service", "READY", now.plusSeconds(3600), now, now)));
+        var service = new EnvironmentService(environments, operations, idempotency, audit, Clock.systemUTC());
+        assertThrows(ApiException.class, () -> service.delete(id));
+        verifyNoInteractions(operations, audit, idempotency);
     }
 
     private void assertCreationTimestamps(Integer suppliedTtl, int expectedTtl) {

@@ -37,6 +37,15 @@ public class EnvironmentRepository {
         return jdbc.query("SELECT * FROM environments WHERE id = ?", MAPPER, id).stream().findFirst();
     }
 
+    public Optional<EnvironmentRecord> lock(UUID id) {
+        return jdbc.query("SELECT * FROM environments WHERE id = ? FOR UPDATE", MAPPER, id)
+                .stream().findFirst();
+    }
+
+    public void deleting(UUID id, Instant now) {
+        jdbc.update("UPDATE environments SET status = 'DELETING', updated_at = ? WHERE id = ?", utc(now), id);
+    }
+
     public List<EnvironmentRecord> page(int page, int size) {
         return jdbc.query("SELECT * FROM environments ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
                 MAPPER, size, (long) page * size);

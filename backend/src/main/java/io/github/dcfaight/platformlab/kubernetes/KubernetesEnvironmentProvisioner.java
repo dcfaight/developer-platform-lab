@@ -3,6 +3,7 @@ package io.github.dcfaight.platformlab.kubernetes;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.Namespace;
 import io.fabric8.kubernetes.api.model.NamespaceBuilder;
+import io.fabric8.kubernetes.api.model.DeleteOptionsBuilder;
 import io.fabric8.kubernetes.api.model.Quantity;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.apps.DeploymentBuilder;
@@ -11,6 +12,8 @@ import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.github.dcfaight.platformlab.environment.EnvironmentRepository.EnvironmentRecord;
 import jakarta.annotation.PreDestroy;
 import java.util.Map;
+import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,6 +25,7 @@ import org.springframework.stereotype.Component;
 public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner, AutoCloseable {
     static final String MANAGED_BY = "app.kubernetes.io/managed-by";
     static final String ENVIRONMENT_ID = "platform-lab/environment-id";
+    static final String CREATE_OPERATION_ID = "platform-lab/create-operation-id";
     static final String DEPLOYMENT = "sample-service";
     static final String IMAGE = "nginxinc/nginx-unprivileged:1.28-alpine";
     private final KubernetesClient client;
@@ -38,32 +42,123 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
 
     @Override
     public void provision(EnvironmentRecord environment) {
+        provision(environment, null);
+    }
+
+    @Override
+    public void provision(EnvironmentRecord environment, UUID createOperationId) {
+        provision(environment, createOperationId, () -> true);
+    }
+
+    @Override
+    public void provision(EnvironmentRecord environment, UUID createOperationId, BooleanSupplier leaseValid) {
         execute(() -> {
             validate(environment);
+            if (!leaseValid.getAsBoolean()) {
+                return null;
+            }
             Namespace namespace = client.namespaces().withName(environment.namespace()).get();
             if (namespace == null) {
+                var labels = new java.util.HashMap<>(ownership(environment));
+                if (createOperationId != null) {
+                    labels.put(CREATE_OPERATION_ID, createOperationId.toString());
+                }
+                if (!leaseValid.getAsBoolean()) {
+                    return null;
+                }
                 namespace = client.namespaces().resource(new NamespaceBuilder()
                         .withNewMetadata().withName(environment.namespace())
-                        .withLabels(ownership(environment)).withAnnotations(ownership(environment))
+                        .withLabels(labels).withAnnotations(labels)
                         .endMetadata().build()).create();
             }
             requireOwned(namespace, environment);
+            if (createOperationId != null) {
+                requireCreateOwnerIfPresent(namespace, createOperationId);
+            }
             Deployment existing = client.apps().deployments().inNamespace(environment.namespace())
                     .withName(DEPLOYMENT).get();
             Deployment desired = deployment(environment);
             if (existing == null) {
+                if (!leaseValid.getAsBoolean()) {
+                    return null;
+                }
                 client.apps().deployments().inNamespace(environment.namespace()).resource(desired).create();
             } else {
                 requireOwned(existing, environment);
                 if (!desired.getSpec().equals(existing.getSpec())) {
                     // Preserve metadata and lock the exact resource read; a race must never adopt a replacement.
                     desired.setMetadata(existing.getMetadata());
+                    if (!leaseValid.getAsBoolean()) {
+                        return null;
+                    }
                     client.apps().deployments().inNamespace(environment.namespace()).resource(desired)
                             .lockResourceVersion(existing.getMetadata().getResourceVersion()).replace();
                 }
             }
             return null;
         });
+    }
+
+    @Override
+    public boolean delete(EnvironmentRecord environment, UUID createOperationId, BooleanSupplier leaseValid) {
+        return execute(() -> {
+            validate(environment);
+            if (createOperationId == null) {
+                throw new ProvisioningException("KUBERNETES_OWNERSHIP_CONFLICT",
+                        "The environment create operation is missing.", false);
+            }
+            Namespace namespace = client.namespaces().withName(environment.namespace()).get();
+            if (namespace == null) {
+                return true;
+            }
+            var metadata = namespace.getMetadata();
+            if (metadata == null || !environment.namespace().equals(metadata.getName())
+                    || !contains(metadata.getLabels(), ownership(environment))
+                    || !contains(metadata.getAnnotations(), ownership(environment))) {
+                throw new ProvisioningException("KUBERNETES_OWNERSHIP_CONFLICT",
+                        "The Kubernetes namespace is not owned by this environment.", false);
+            }
+            requireCreateOwnerIfPresent(namespace, createOperationId);
+            if (metadata.getDeletionTimestamp() != null || (namespace.getStatus() != null
+                    && "Terminating".equals(namespace.getStatus().getPhase()))) {
+                return false;
+            }
+            if (metadata.getUid() == null || metadata.getUid().isBlank()
+                    || metadata.getResourceVersion() == null || metadata.getResourceVersion().isBlank()) {
+                throw new ProvisioningException("KUBERNETES_VALIDATION_FAILED",
+                        "The Kubernetes namespace identity is missing.", false);
+            }
+            if (!leaseValid.getAsBoolean()) {
+                return false;
+            }
+            try {
+                // Fabric8's typed delete DSL only supports resourceVersion, not UID preconditions.
+                client.raw("/api/v1/namespaces/" + environment.namespace(), "DELETE", new DeleteOptionsBuilder()
+                        .withNewPreconditions().withUid(metadata.getUid())
+                            .withResourceVersion(metadata.getResourceVersion()).endPreconditions().build());
+            } catch (KubernetesClientException exception) {
+                if (exception.getCode() == 404) {
+                    return true;
+                }
+                throw exception;
+            }
+            // An accepted DELETE is not completion: finalizers can keep the namespace alive.
+            return false;
+        });
+    }
+
+    private static void requireCreateOwnerIfPresent(Namespace namespace, UUID createOperationId) {
+        var metadata = namespace.getMetadata();
+        // Original platform namespaces predate CREATE markers; do not relabel or adopt them.
+        if (!metadata.getLabels().containsKey(CREATE_OPERATION_ID)
+                && !metadata.getAnnotations().containsKey(CREATE_OPERATION_ID)) {
+            return;
+        }
+        var expected = Map.of(CREATE_OPERATION_ID, createOperationId.toString());
+        if (!contains(metadata.getLabels(), expected) || !contains(metadata.getAnnotations(), expected)) {
+            throw new ProvisioningException("KUBERNETES_OWNERSHIP_CONFLICT",
+                    "The namespace is not owned by the environment create operation.", false);
+        }
     }
 
     @Override

@@ -19,8 +19,10 @@ public class WorkerRepository {
                 WITH candidate AS (
                     SELECT *, CASE
                         WHEN started_at + (? * interval '1 millisecond') <= clock_timestamp()
-                            THEN 'READINESS_TIMEOUT'
-                        WHEN provisioned_at IS NULL AND attempt_count >= ? THEN 'ATTEMPTS_EXHAUSTED'
+                            THEN CASE WHEN type = 'DELETE_ENVIRONMENT' THEN 'DELETION_TIMEOUT'
+                                ELSE 'READINESS_TIMEOUT' END
+                        WHEN type = 'CREATE_ENVIRONMENT' AND provisioned_at IS NULL
+                            AND attempt_count >= ? THEN 'ATTEMPTS_EXHAUSTED'
                         END AS exhausted
                     FROM operations
                     WHERE (status = 'PENDING' AND next_attempt_at <= clock_timestamp())
@@ -38,15 +40,21 @@ public class WorkerRepository {
                         started_at = COALESCE(o.started_at, clock_timestamp()),
                         completed_at = CASE WHEN c.exhausted IS NOT NULL THEN clock_timestamp() ELSE NULL END,
                         failure_code = c.exhausted,
-                        failure_message = CASE WHEN c.exhausted IS NOT NULL
-                            THEN 'Provisioning did not complete within its limits.' ELSE NULL END,
+                        failure_message = CASE WHEN c.exhausted IS NOT NULL THEN
+                            CASE WHEN c.type = 'DELETE_ENVIRONMENT'
+                                THEN 'Deletion did not complete within its limits.'
+                                ELSE 'Provisioning did not complete within its limits.' END ELSE NULL END,
                         progress_step = CASE WHEN c.exhausted IS NOT NULL THEN 'FAILED'
+                            WHEN o.type = 'DELETE_ENVIRONMENT' THEN 'DELETING'
                             WHEN o.provisioned_at IS NULL THEN 'PROVISIONING' ELSE 'WAITING' END,
                         updated_at = clock_timestamp()
                     FROM candidate c WHERE o.id = c.id RETURNING o.*
                 ), environment_change AS (
-                    UPDATE environments e SET status = CASE WHEN c.status = 'FAILED' THEN 'FAILED'
-                        ELSE 'PROVISIONING' END, updated_at = clock_timestamp()
+                    UPDATE environments e SET status = CASE
+                        WHEN c.type = 'DELETE_ENVIRONMENT' THEN
+                            CASE WHEN c.status = 'FAILED' THEN 'DELETE_FAILED' ELSE 'DELETING' END
+                        WHEN c.status = 'FAILED' THEN 'FAILED' ELSE 'PROVISIONING' END,
+                        updated_at = clock_timestamp()
                     FROM changed c WHERE e.id = c.environment_id
                 ), event AS (
                     INSERT INTO operation_events (operation_id, type, code, message, correlation_id)
@@ -54,11 +62,15 @@ public class WorkerRepository {
                         COALESCE(failure_code, 'CLAIMED'),
                         COALESCE(failure_message, 'Worker acquired the operation.'), correlation_id FROM changed
                 )
-                SELECT * FROM changed
+                SELECT changed.*, (SELECT id FROM operations WHERE environment_id = changed.environment_id
+                    AND type = 'CREATE_ENVIRONMENT') AS create_operation_id
+                FROM changed
                 """, (rs, row) -> new Claim(rs.getObject("id", UUID.class),
                 rs.getObject("environment_id", UUID.class), rs.getObject("lease_token", UUID.class),
                 rs.getString("status"), rs.getTimestamp("provisioned_at") != null,
-                rs.getInt("failure_count")), properties.readinessTimeout().toMillis(),
+                rs.getInt("failure_count"), rs.getString("type"),
+                rs.getObject("create_operation_id", UUID.class), rs.getInt("attempt_count")),
+                properties.readinessTimeout().toMillis(),
                 properties.maxAttempts(), UUID.randomUUID(), properties.leaseDuration().toMillis())
                 .stream().findFirst();
     }
@@ -73,7 +85,16 @@ public class WorkerRepository {
                 "Resources are not ready yet.", null, null, delay, false, false);
     }
 
+    public boolean deletionWaiting(Claim claim, Duration delay) {
+        return transition(claim, "PENDING", "WAITING", "WAITING", "WAITING",
+                "Waiting for the environment namespace to disappear.", null, null, delay, false, true);
+    }
+
     public boolean succeed(Claim claim) {
+        if (claim.deleting()) {
+            return transition(claim, "SUCCEEDED", "DELETED", "SUCCEEDED", "SUCCEEDED",
+                    "Environment namespace is absent.", null, null, Duration.ZERO, false, false);
+        }
         return transition(claim, "SUCCEEDED", "READY", "SUCCEEDED", "SUCCEEDED",
                 "Environment is ready.", null, null, Duration.ZERO, false, false);
     }
@@ -86,6 +107,13 @@ public class WorkerRepository {
     public boolean retry(Claim claim, String code, String message, Duration delay) {
         return transition(claim, "PENDING", "RETRY", "RETRY", code, message,
                 code, message, delay, true, false);
+    }
+
+    public boolean owns(Claim claim) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("""
+                SELECT EXISTS (SELECT 1 FROM operations WHERE id = ? AND status = 'RUNNING'
+                    AND lease_token = ? AND lease_expires_at > clock_timestamp())
+                """, Boolean.class, claim.id(), claim.leaseToken()));
     }
 
     private boolean transition(Claim claim, String status, String step, String event, String code,
@@ -105,8 +133,12 @@ public class WorkerRepository {
                         AND lease_expires_at > clock_timestamp()
                     RETURNING *
                 ), environment_change AS (
-                    UPDATE environments e SET status = CASE c.status
-                        WHEN 'SUCCEEDED' THEN 'READY' WHEN 'FAILED' THEN 'FAILED' ELSE 'PROVISIONING' END,
+                    UPDATE environments e SET status = CASE WHEN c.type = 'DELETE_ENVIRONMENT' THEN
+                        CASE c.status WHEN 'SUCCEEDED' THEN 'DELETED' WHEN 'FAILED' THEN 'DELETE_FAILED'
+                            ELSE 'DELETING' END
+                        ELSE CASE c.status
+                        WHEN 'SUCCEEDED' THEN 'READY' WHEN 'FAILED' THEN 'FAILED' ELSE 'PROVISIONING' END
+                        END,
                         updated_at = clock_timestamp()
                     FROM changed c WHERE e.id = c.environment_id
                 ), event AS (
@@ -120,6 +152,9 @@ public class WorkerRepository {
     }
 
     public record Claim(UUID id, UUID environmentId, UUID leaseToken, String status,
-            boolean provisioned, int failureCount) {
+            boolean provisioned, int failureCount, String type, UUID createOperationId, int attemptCount) {
+        public boolean deleting() {
+            return "DELETE_ENVIRONMENT".equals(type);
+        }
     }
 }

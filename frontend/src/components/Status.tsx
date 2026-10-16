@@ -1,7 +1,7 @@
 export function Status({ value }: { value: string }) {
-  const tone = ['READY', 'SUCCEEDED'].includes(value) ? 'success'
-    : value === 'FAILED' ? 'danger'
-    : ['RUNNING', 'PROVISIONING'].includes(value) ? 'active' : 'neutral'
+  const tone = ['READY', 'SUCCEEDED', 'DELETED'].includes(value) ? 'success'
+    : ['FAILED', 'DELETE_FAILED'].includes(value) ? 'danger'
+    : ['RUNNING', 'PROVISIONING', 'DELETING'].includes(value) ? 'active' : 'neutral'
   return <span className={`status status-${tone}`}>{value.replaceAll('_', ' ')}</span>
 }
 

@@ -1,7 +1,8 @@
-# Local demo: request → provision → observe
+# Local demo: request → provision → observe → delete
 
 **Story:** the portal submits a request through the API, a leased worker provisions
 the approved sample in kind, and the portal shows the persisted operation progress.
+Confirmed deletion then removes only the owned namespace and retains its history.
 Acceptance is not readiness; `READY` means initial Deployment readiness was observed,
 not that the application is continuously monitored.
 
@@ -155,6 +156,59 @@ kubectl --context kind-developer-platform-lab -n "$NAMESPACE" \
 # Open http://127.0.0.1:8081 in a browser.
 ```
 
+## 4. Delete safely and verify absence
+
+Stop any sample port-forward first. In the portal, open the environment detail,
+choose **Delete environment**, inspect the target, and confirm. The action is
+unavailable during creation or an active delete, and for deleted records.
+Acceptance means durable `DELETING`, not that Kubernetes removal is complete.
+Watch the newest `DELETE_ENVIRONMENT` operation and its request correlation.
+The terminal outcome is `DELETED` / `SUCCEEDED` or `DELETE_FAILED` / `FAILED`.
+
+For the API-created environment, use the **same Bash terminal**:
+
+```bash
+DELETE_ACCEPTED=$(curl --fail-with-body --silent --show-error \
+  --connect-timeout 3 --max-time 15 -X DELETE \
+  "$API/environments/$ENVIRONMENT_ID")
+jq . <<< "$DELETE_ACCEPTED"
+DELETE_OPERATION_ID=$(jq -er '.operationId' <<< "$DELETE_ACCEPTED")
+deadline=$((SECONDS + 420))
+status=PENDING
+while (( SECONDS < deadline )); do
+  OPERATION=$(curl --fail-with-body --silent --show-error \
+    --connect-timeout 3 --max-time 10 "$API/operations/$DELETE_OPERATION_ID")
+  jq '{status, progressStep, attemptCount, failureCode, failureMessage}' <<< "$OPERATION"
+  status=$(jq -er '.status' <<< "$OPERATION")
+  case "$status" in
+    SUCCEEDED) break ;;
+    FAILED) jq '.events' <<< "$OPERATION"; exit 1 ;;
+  esac
+  sleep 3
+done
+[[ "$status" == SUCCEEDED ]] || { echo 'Deletion still incomplete; inspect history.' >&2; exit 1; }
+curl --fail-with-body --silent --show-error --connect-timeout 3 --max-time 10 \
+  "$API/environments/$ENVIRONMENT_ID" | jq '{status, latestOperation}'
+# Success prints nothing; connection/permission errors must not be mistaken for absence.
+REMAINING=$(kubectl --context kind-developer-platform-lab get namespace \
+  "$NAMESPACE" --ignore-not-found -o name)
+[[ -z "$REMAINING" ]] || { echo 'Namespace remains; inspect it.' >&2; exit 1; }
+```
+
+Expected: the record remains readable as `DELETED`, namespace is absent, and
+history includes creation plus deletion. A repeat DELETE while active returns
+the same operation; after completion it is rejected as already deleted. For a
+deterministic replay demonstration, disable the worker **after creation finishes**,
+submit DELETE twice, compare operation IDs, then restart the worker with the same
+database. Pending work survives restart. Do not delete a still-provisioning record.
+
+If deletion fails, inspect the sanitized error and correlation ID. Fix the cause
+before explicitly retrying from the detail view or API; the previous failure stays
+in history. Never relabel an unrelated namespace to bypass ownership checks, strip
+finalizers, or delete namespaces directly as a recovery shortcut. Kubernetes
+absence is success, but an owned namespace stuck terminating remains pending until
+the deadline and can report `DELETE_FAILED`.
+
 ## Troubleshooting and presenter fallback
 
 | Symptom | Check / expected behavior |
@@ -164,12 +218,25 @@ kubectl --context kind-developer-platform-lab -n "$NAMESPACE" \
 | Operation stays `PENDING` with zero attempts | Restart the backend with `WORKER_ENABLED=true` and the same database exports. API-only acceptance still works with the worker off. |
 | Kubernetes configuration or ownership failure | Inspect sanitized failure fields and backend logs locally. Verify the trusted kubeconfig contains `kind-developer-platform-lab` and a loopback HTTPS endpoint; do not bypass safety checks. |
 | Provisioning times out / image pull stalls | Inspect `kubectl --context kind-developer-platform-lab -n "$NAMESPACE" describe pods` and operation events; check Docker resources/network access. Failed operations are terminal; fix the cause and use a new request key. |
+| Deletion fails or stays pending | Inspect the delete operation and namespace metadata. Check worker configuration, ownership labels, connectivity, and finalizers. The worker does not force removal. After correcting the cause, retry a `DELETE_FAILED` record through the API/portal. |
 | Refresh fails after data loaded | The portal retains and labels last-loaded data. Restore the backend and use **Try again**; do not narrate stale status as live health. |
 
 For a portal/API-only walkthrough, omit kind and leave the worker disabled:
 demonstrate durable `REQUESTED` / `PENDING`, safe replay, and portal reads. **Do not claim that
 resources were provisioned.** Restarting the backend with the worker enabled
 later processes pending work. Never use a shared cluster for failure injection.
+
+### Verification limits for this lifecycle slice
+
+Automated frontend and PostgreSQL-backed backend checks cover acceptance,
+ownership conflicts, duplicate requests, retries, and lease recovery. A real-kind
+namespace deletion check was also exercised. The complete create → readiness →
+delete test could not finish in the implementation sandbox: sample and CoreDNS
+HTTP probes timed out, with infrastructure pods unhealthy as well. Browser
+verification was blocked by the Playwright transport's OAuth requirement.
+Neither a successful full browser-to-cluster flow nor production readiness is
+claimed. Run the walkthrough above on a working local kind installation to close
+these evidence gaps; do not disable probes or bypass ownership checks to do so.
 
 ## Finish / reset
 
@@ -180,9 +247,10 @@ without discarding its named volume:
 docker compose stop postgres
 ```
 
-There is no deletion API or automatic cleanup on expiry, failure, or shutdown.
+Use the portal/API deletion workflow for individual environments before stopping
+the worker. There is still no automatic cleanup on expiry, failure, or shutdown.
 If you intentionally want to remove **all workloads in this disposable lab
-cluster**, use the existing manual reset:
+cluster**, the separate manual reset remains:
 
 ```sh
 kind delete cluster --name developer-platform-lab

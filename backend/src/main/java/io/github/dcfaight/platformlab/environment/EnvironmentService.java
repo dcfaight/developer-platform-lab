@@ -64,6 +64,40 @@ public class EnvironmentService {
                 page, size, total, (total + size - 1) / size);
     }
 
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public AcceptedEnvironmentResponse delete(UUID id) {
+        var environment = environments.lock(id).orElseThrow(() ->
+                new ApiException(HttpStatus.NOT_FOUND, "NOT_FOUND", "Environment not found."));
+        if (!("env-" + id.toString().replace("-", "")).equals(environment.namespace())) {
+            throw new ApiException(HttpStatus.CONFLICT, "INVALID_ENVIRONMENT_NAMESPACE",
+                    "The persisted environment namespace is invalid.");
+        }
+        if ("DELETED".equals(environment.status()) || "REQUESTED".equals(environment.status())
+                || "PROVISIONING".equals(environment.status())) {
+            throw new ApiException(HttpStatus.CONFLICT, "ENVIRONMENT_STATE_CONFLICT",
+                    "The environment cannot be deleted in its current state.");
+        }
+        var active = operations.active(id);
+        if (active.isPresent()) {
+            var operation = active.orElseThrow();
+            if ("DELETE_ENVIRONMENT".equals(operation.type())) {
+                return new AcceptedEnvironmentResponse(id, operation.id(), "DELETING", operation.status());
+            }
+            throw new ApiException(HttpStatus.CONFLICT, "ENVIRONMENT_STATE_CONFLICT",
+                    "Another operation is active for this environment.");
+        }
+        if (!java.util.Set.of("READY", "FAILED", "DELETE_FAILED").contains(environment.status())) {
+            throw new ApiException(HttpStatus.CONFLICT, "ENVIRONMENT_STATE_CONFLICT",
+                    "The environment cannot be deleted in its current state.");
+        }
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
+        UUID operationId = UUID.randomUUID();
+        operations.insertDelete(operationId, id, now);
+        environments.deleting(id, now);
+        audit.recordDeletion(id, operationId, now);
+        return new AcceptedEnvironmentResponse(id, operationId, "DELETING", "PENDING");
+    }
+
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public EnvironmentResponse get(UUID id) {
         return response(environments.find(id).orElseThrow(() ->

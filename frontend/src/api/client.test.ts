@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, createEnvironment, environment, environmentPage, operationPage, read } from './client'
+import { ApiError, createEnvironment, deleteEnvironment, environment, environmentPage, operationPage, read } from './client'
 import { demoEnvironment, demoOperation, json, paged } from '../test/fixtures'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -125,5 +125,59 @@ describe('read-only API boundary', () => {
       message: expect.stringContaining('earlier request may already exist'),
       requestId: 'request-conflict', code: 'IDEMPOTENCY_CONFLICT',
     })
+  })
+
+  it.each(['PENDING', 'RUNNING'])('accepts deletion %s without relaxing creation acceptance', async (operationStatus) => {
+    const payload = { environmentId: demoEnvironment.id, operationId: demoOperation.id,
+      environmentStatus: 'DELETING', operationStatus }
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => json(payload, 202)))
+    expect(await deleteEnvironment(demoEnvironment.id)).toEqual(payload)
+    await expect(createEnvironment({ name: 'demo', templateId: 'sample-service', ttlHours: 8 }, 'key'))
+      .rejects.toMatchObject({ message: 'The API returned an unexpected creation response.' })
+  })
+
+  it.each([
+    { environmentId: demoEnvironment.id, operationId: demoOperation.id, environmentStatus: 'REQUESTED', operationStatus: 'PENDING' },
+    { environmentId: demoEnvironment.id, operationId: demoOperation.id, environmentStatus: 'DELETING', operationStatus: 'SUCCEEDED' },
+    { environmentId: demoEnvironment.id, operationId: 'invalid', environmentStatus: 'DELETING', operationStatus: 'PENDING' },
+    { environmentId: demoOperation.id, operationId: demoOperation.id, environmentStatus: 'DELETING', operationStatus: 'PENDING' },
+  ])('rejects malformed deletion acceptance %j', async (payload) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(payload, 202)))
+    await expect(deleteEnvironment(demoEnvironment.id)).rejects.toMatchObject({
+      message: expect.stringContaining('unexpected deletion response'), outcomeUncertain: true,
+    })
+  })
+
+  it('sanitizes deletion proxy errors and unsafe request IDs', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('<html>secret diagnostic</html>', {
+      status: 502, headers: { 'X-Request-Id': 'safe-request-id' },
+    })))
+    await expect(deleteEnvironment(demoEnvironment.id)).rejects.toMatchObject({
+      requestId: 'safe-request-id', outcomeUncertain: true, message: expect.not.stringContaining('secret'),
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({
+      message: 'secret', requestId: '<script>secret</script>', code: '<script>secret</script>',
+    }, 409)))
+    await expect(deleteEnvironment(demoEnvironment.id)).rejects.toMatchObject({
+      requestId: undefined, code: undefined, outcomeUncertain: false, message: expect.not.stringContaining('secret'),
+    })
+  })
+
+  it('treats deletion timeouts as uncertain and clears its timer', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+        })))
+      const pending = expect(deleteEnvironment(demoEnvironment.id)).rejects.toMatchObject({
+        outcomeUncertain: true, message: expect.stringContaining('timed out'),
+      })
+      await vi.advanceTimersByTimeAsync(15_000)
+      await pending
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

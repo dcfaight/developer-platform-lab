@@ -100,7 +100,7 @@ class OperationStatusTests {
         jdbc.update("""
                 INSERT INTO operations (id, environment_id, type, status, attempt_count,
                     next_attempt_at, created_at, updated_at, progress_step)
-                VALUES (?, ?, 'CREATE_ENVIRONMENT', 'PENDING', 0, now(),
+                VALUES (?, ?, 'DELETE_ENVIRONMENT', 'PENDING', 0, now(),
                     now() + interval '1 second', now(), 'ACCEPTED')
                 """, newerId, UUID.fromString(environmentId));
         var newest = mapper.readTree(get(client, "/api/v1/environments/" + environmentId

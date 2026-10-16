@@ -43,6 +43,22 @@ public class OperationRepository {
         return jdbc.query("SELECT * FROM operations WHERE id = ?", MAPPER, id).stream().findFirst();
     }
 
+    public Optional<OperationRecord> active(UUID environmentId) {
+        return jdbc.query("""
+                SELECT * FROM operations WHERE environment_id = ? AND status IN ('PENDING', 'RUNNING')
+                """, MAPPER, environmentId).stream().findFirst();
+    }
+
+    public void insertDelete(UUID id, UUID environmentId, Instant now) {
+        OffsetDateTime timestamp = now.atOffset(ZoneOffset.UTC);
+        jdbc.update("""
+                INSERT INTO operations (id, environment_id, type, status,
+                    next_attempt_at, created_at, updated_at, correlation_id)
+                VALUES (?, ?, 'DELETE_ENVIRONMENT', 'PENDING', ?, ?, ?, ?)
+                """, id, environmentId, timestamp, timestamp, timestamp,
+                MDC.get(RequestCorrelationFilter.REQUEST_ID));
+    }
+
     public List<OperationRecord> page(UUID environmentId, int page, int size) {
         return jdbc.query("""
                 SELECT * FROM operations WHERE environment_id = ?

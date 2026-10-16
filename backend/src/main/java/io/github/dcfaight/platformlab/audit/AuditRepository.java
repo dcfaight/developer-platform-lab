@@ -20,4 +20,11 @@ public class AuditRepository {
                 VALUES (?, ?, ?, 'ENVIRONMENT_REQUESTED', 'local-development', ?)
                 """, UUID.randomUUID(), environmentId, operationId, now.atOffset(ZoneOffset.UTC));
     }
+
+    public void recordDeletion(UUID environmentId, UUID operationId, Instant now) {
+        jdbc.update("""
+                INSERT INTO audit_events (id, environment_id, operation_id, action, actor, created_at)
+                VALUES (?, ?, ?, 'ENVIRONMENT_DELETE_REQUESTED', 'local-development', ?)
+                """, UUID.randomUUID(), environmentId, operationId, now.atOffset(ZoneOffset.UTC));
+    }
 }

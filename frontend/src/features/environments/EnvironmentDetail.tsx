@@ -5,6 +5,7 @@ import { useResource } from '../../api/useResource'
 import { Pagination } from '../../components/Pagination'
 import { ResourceState } from '../../components/ResourceState'
 import { Status, Timestamp } from '../../components/Status'
+import { DeleteEnvironment } from './DeleteEnvironment'
 
 function OperationCard({ item }: { item: Operation }) {
   return <article className="operation" aria-label={`Operation ${item.id}`}>
@@ -13,7 +14,7 @@ function OperationCard({ item }: { item: Operation }) {
       <Status value={item.status} />
     </div>
     <p className="progress-step">Current step: <strong>{item.progressStep?.replaceAll('_', ' ') ?? 'Awaiting progress'}</strong>
-      {' · '}{item.attemptCount} provisioning {item.attemptCount === 1 ? 'attempt' : 'attempts'}</p>
+      {' · '}{item.attemptCount} {item.attemptCount === 1 ? 'attempt' : 'attempts'}</p>
     {(item.failureCode || item.failureMessage) && <div className="notice error">
       <strong>{item.status === 'FAILED' ? 'Failure summary' : 'Last failure (retry may be pending)'}</strong>
       <code>{item.failureCode}</code><p>{item.failureMessage}</p>
@@ -44,7 +45,7 @@ function OperationHistory({ id }: { id: string }) {
   const [page, setPage] = useState(0)
   const resource = useResource(`/environments/${encodeURIComponent(id)}/operations?page=${page}&size=5`, operationPage)
   return <section className="panel" aria-labelledby="operations-heading">
-    <div className="section-heading"><div><p className="eyebrow">Provisioning observability</p>
+    <div className="section-heading"><div><p className="eyebrow">Operation observability</p>
       <h2 id="operations-heading">Operation history</h2></div>
       {resource.data && <span className="count">{resource.data.totalElements} total</span>}
     </div>
@@ -60,6 +61,7 @@ function OperationHistory({ id }: { id: string }) {
 }
 
 export function EnvironmentDetail({ id }: { id: string }) {
+  const [historyRevision, setHistoryRevision] = useState(0)
   const resource = useResource(`/environments/${encodeURIComponent(id)}`, environment)
   const item = resource.data
   return <>
@@ -83,8 +85,13 @@ export function EnvironmentDetail({ id }: { id: string }) {
             : 'No operations'}</dd></div>
         </dl>
         <p className="muted">Expiry is metadata only; automatic cleanup is not implemented.</p>
+        <DeleteEnvironment key={id} item={item} unavailable={resource.busy || !!resource.error}
+          onRefresh={() => {
+            resource.refresh()
+            setHistoryRevision((value) => value + 1)
+          }} />
       </>}
     </section>
-    {item && <OperationHistory id={id} />}
+    {item && <OperationHistory key={`${id}-${historyRevision}`} id={id} />}
   </>
 }

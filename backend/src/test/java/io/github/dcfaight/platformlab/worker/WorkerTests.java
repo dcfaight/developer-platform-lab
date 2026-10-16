@@ -109,7 +109,7 @@ class WorkerTests {
         assertEquals(List.of("CLAIMED", "PROVISIONED", "SUCCEEDED"), eventTypes(id));
         assertTrue(operations.events(id).stream().allMatch(event -> event.createdAt() != null));
         worker.poll();
-        verify(provisioner, times(1)).provision(any());
+        verify(provisioner, times(1)).provision(any(), any(), any());
     }
 
     @Test
@@ -136,7 +136,7 @@ class WorkerTests {
             worker.poll();
         }
         assertEquals(1, operations.find(id).orElseThrow().attemptCount());
-        verify(provisioner, times(1)).provision(any());
+        verify(provisioner, times(1)).provision(any(), any(), any());
         when(provisioner.isReady(any())).thenReturn(true);
         due(id);
         worker.poll();
@@ -163,7 +163,7 @@ class WorkerTests {
         when(failure.retryable()).thenReturn(true);
         when(failure.code()).thenReturn("KUBERNETES_UNAVAILABLE");
         when(failure.getMessage()).thenReturn("Kubernetes is unavailable.");
-        doThrow(failure).when(provisioner).provision(any());
+        doThrow(failure).when(provisioner).provision(any(), any(), any());
         worker.poll();
         assertEquals("PENDING", operations.find(id).orElseThrow().status());
         assertEquals(Boolean.TRUE, jdbc.queryForObject("""
@@ -186,7 +186,7 @@ class WorkerTests {
         when(failure.retryable()).thenReturn(false);
         when(failure.code()).thenReturn("KUBERNETES_FORBIDDEN");
         when(failure.getMessage()).thenReturn("Kubernetes access was denied.");
-        doThrow(failure).when(provisioner).provision(any());
+        doThrow(failure).when(provisioner).provision(any(), any(), any());
         worker.poll();
         assertEquals("FAILED", operations.find(id).orElseThrow().status());
         assertEquals("FAILED", environmentStatus(id));
@@ -208,7 +208,7 @@ class WorkerTests {
         }
         assertEquals("FAILED", operations.find(id).orElseThrow().status());
         assertEquals(1, operations.find(id).orElseThrow().attemptCount());
-        verify(provisioner, times(1)).provision(any());
+        verify(provisioner, times(1)).provision(any(), any(), any());
         verify(provisioner, times(3)).isReady(any());
     }
 
@@ -227,7 +227,7 @@ class WorkerTests {
         worker.poll();
         assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
         assertEquals("READY", environmentStatus(id));
-        verify(provisioner, times(1)).provision(any());
+        verify(provisioner, times(1)).provision(any(), any(), any());
     }
 
     @Test
@@ -248,7 +248,7 @@ class WorkerTests {
     @Test
     void unexpectedExceptionIsSanitizedPersistedAndNotSwallowed() {
         UUID id = create();
-        doThrow(new IllegalStateException("secret-token-response-body")).when(provisioner).provision(any());
+        doThrow(new IllegalStateException("secret-token-response-body")).when(provisioner).provision(any(), any(), any());
         var thrown = assertThrows(IllegalStateException.class, worker::poll);
         assertFalse(thrown.getMessage().contains("secret"));
         assertNull(thrown.getCause());
@@ -257,6 +257,256 @@ class WorkerTests {
         assertEquals("INTERNAL_ERROR", operation.failureCode());
         assertEquals("An internal provisioning error occurred.", operation.failureMessage());
         assertEquals(List.of("CLAIMED", "FAILED"), eventTypes(id));
+    }
+
+    @Test
+    void deletionWaitsForAbsenceAndNeverReprovisions() {
+        UUID id = delete();
+        var createId = jdbc.queryForObject("""
+                SELECT id FROM operations WHERE environment_id = ? AND type = 'CREATE_ENVIRONMENT'
+                """, UUID.class, operations.find(id).orElseThrow().environmentId());
+        when(provisioner.delete(any(), eq(createId), any())).thenReturn(false, false, true);
+        for (int i = 0; i < 2; i++) {
+            due(id);
+            worker.poll();
+            assertEquals("PENDING", operations.find(id).orElseThrow().status());
+            assertEquals("DELETING", environmentStatus(id));
+            var events = operations.events(id);
+            assertEquals("Waiting for the environment namespace to disappear.",
+                    events.get(events.size() - 1).message());
+        }
+
+        due(id);
+        worker.poll();
+        assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
+        assertEquals("DELETED", operations.find(id).orElseThrow().progressStep());
+        assertEquals("DELETED", environmentStatus(id));
+        verify(provisioner, never()).provision(any(), any(), any());
+        verify(provisioner, times(3)).delete(any(), eq(createId), any());
+        assertEquals(1, operations.find(id).orElseThrow().attemptCount());
+    }
+
+    @Test
+    void deletionCrashExhaustionDoesNotAllowAnotherDestructiveRequest() {
+        UUID id = delete();
+        for (int i = 0; i < properties.maxAttempts(); i++) {
+            repository.claim(properties).orElseThrow();
+            expire(id);
+        }
+        when(provisioner.delete(any(), any(), any())).thenAnswer(invocation -> {
+            ((java.util.function.BooleanSupplier) invocation.getArgument(2)).getAsBoolean();
+            fail("An exhausted reclaim must not issue a new DELETE");
+            return false;
+        });
+        worker.poll();
+        assertEquals("FAILED", operations.find(id).orElseThrow().status());
+        assertEquals("ATTEMPTS_EXHAUSTED", operations.find(id).orElseThrow().failureCode());
+        assertEquals("Deletion did not complete within its attempt limits.",
+                operations.find(id).orElseThrow().failureMessage());
+        assertEquals("DELETE_FAILED", environmentStatus(id));
+    }
+
+    @Test
+    void deletionCrashExhaustionStillAllowsTerminatingNamespaceToFinish() {
+        UUID id = delete();
+        for (int i = 0; i < properties.maxAttempts(); i++) {
+            repository.claim(properties).orElseThrow();
+            expire(id);
+        }
+        // A terminating namespace does not invoke the destructive-request lease callback.
+        when(provisioner.delete(any(), any(), any())).thenReturn(false);
+        for (int i = 0; i < properties.maxAttempts() + 2; i++) {
+            due(id);
+            worker.poll();
+            assertEquals("PENDING", operations.find(id).orElseThrow().status());
+            assertEquals("DELETING", environmentStatus(id));
+        }
+        assertEquals(properties.maxAttempts() + 1, operations.find(id).orElseThrow().attemptCount());
+        doReturn(true).when(provisioner).delete(any(), any(), any());
+        due(id);
+        worker.poll();
+        assertEquals("DELETED", environmentStatus(id));
+    }
+
+    @Test
+    void expiredCreateLeaseBeforeProvisioningDoesNotStartExternalWork() {
+        UUID id = create();
+        UUID environmentId = operations.find(id).orElseThrow().environmentId();
+        var expiring = spy(new EnvironmentRepository(jdbc));
+        doAnswer(invocation -> {
+            expire(id);
+            return invocation.callRealMethod();
+        }).when(expiring).find(environmentId);
+        worker = new ProvisioningWorker(repository, expiring, provisioner, properties);
+        worker.poll();
+        verify(provisioner, never()).provision(any(), any(), any());
+        assertEquals("RUNNING", operations.find(id).orElseThrow().status());
+        assertEquals(List.of("CLAIMED"), eventTypes(id));
+    }
+
+    @Test
+    void createLeaseCallbackIsFencedAfterFailureAndDeleteAcceptance() {
+        UUID id = create();
+        var stale = repository.claim(properties).orElseThrow();
+        java.util.function.BooleanSupplier leaseValid = () -> repository.owns(stale);
+        assertTrue(leaseValid.getAsBoolean());
+        expire(id);
+        var recovered = repository.claim(properties).orElseThrow();
+        assertTrue(repository.fail(recovered, "FAILED", "Creation failed."));
+        var accepted = service.delete(stale.environmentId());
+        assertEquals("DELETING", accepted.environmentStatus());
+        assertFalse(leaseValid.getAsBoolean());
+        assertFalse(repository.provisioned(stale));
+        assertFalse(repository.succeed(stale));
+    }
+
+    @Test
+    void originalCreateOperationIsUniqueAndDeletionClaimsItsExactId() {
+        UUID id = delete();
+        UUID environmentId = operations.find(id).orElseThrow().environmentId();
+        UUID original = jdbc.queryForObject("""
+                SELECT id FROM operations WHERE environment_id = ? AND type = 'CREATE_ENVIRONMENT'
+                """, UUID.class, environmentId);
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
+                () -> jdbc.update("""
+                        INSERT INTO operations (id, environment_id, type, status,
+                            next_attempt_at, created_at, updated_at)
+                        VALUES (?, ?, 'CREATE_ENVIRONMENT', 'SUCCEEDED', now(), now(), now())
+                        """, UUID.randomUUID(), environmentId));
+        assertEquals(original, repository.claim(properties).orElseThrow().createOperationId());
+    }
+
+    @Test
+    void deletionTransientFailuresAreBoundedAndRetryCreatesNewHistory() {
+        UUID id = delete();
+        when(provisioner.delete(any(), any(), any())).thenThrow(
+                new ProvisioningException("KUBERNETES_UNAVAILABLE", "Kubernetes is unavailable.", true));
+        for (int i = 0; i < properties.maxAttempts(); i++) {
+            due(id);
+            worker.poll();
+        }
+        assertEquals("FAILED", operations.find(id).orElseThrow().status());
+        assertEquals("DELETE_FAILED", environmentStatus(id));
+        assertEquals(List.of("CLAIMED", "RETRY", "CLAIMED", "RETRY", "CLAIMED", "FAILED"), eventTypes(id));
+        UUID environmentId = operations.find(id).orElseThrow().environmentId();
+        var retry = service.delete(environmentId);
+        assertNotEquals(id, retry.operationId());
+        doReturn(true).when(provisioner).delete(any(), any(), any());
+        worker.poll();
+        assertEquals("DELETED", environmentStatus(id));
+        assertEquals("FAILED", operations.find(id).orElseThrow().status());
+        assertEquals(3, operations.count(environmentId));
+    }
+
+    @Test
+    void deletionOwnershipFailureIsTerminal() {
+        UUID id = delete();
+        when(provisioner.delete(any(), any(), any())).thenThrow(
+                new ProvisioningException("KUBERNETES_OWNERSHIP_CONFLICT", "Namespace is not owned.", false));
+        worker.poll();
+        assertEquals("DELETE_FAILED", environmentStatus(id));
+        assertEquals("KUBERNETES_OWNERSHIP_CONFLICT", operations.find(id).orElseThrow().failureCode());
+        assertTrue(repository.claim(properties).isEmpty());
+    }
+
+    @Test
+    void unexpectedDeletionFailureUsesSanitizedDeletionMessage() {
+        UUID id = delete();
+        when(provisioner.delete(any(), any(), any())).thenThrow(new IllegalStateException("secret-response"));
+        var failure = assertThrows(IllegalStateException.class, worker::poll);
+        assertTrue(failure.getMessage().contains("environment operation"));
+        assertFalse(failure.getMessage().contains("secret"));
+        assertNull(failure.getCause());
+        var operation = operations.find(id).orElseThrow();
+        assertEquals("INTERNAL_ERROR", operation.failureCode());
+        assertEquals("An internal deletion error occurred.", operation.failureMessage());
+        assertEquals("DELETE_FAILED", environmentStatus(id));
+    }
+
+    @Test
+    void deletionReclaimsEvenLastCrashedAttemptAndFencesStaleOwner() {
+        UUID id = delete();
+        var stale = repository.claim(properties).orElseThrow();
+        assertTrue(stale.deleting());
+        expire(id);
+        assertFalse(repository.owns(stale));
+        assertFalse(repository.succeed(stale));
+        assertFalse(repository.fail(stale, "FAILED", "Failed."));
+        assertFalse(repository.waiting(stale, Duration.ZERO));
+        for (int i = 1; i < properties.maxAttempts(); i++) {
+            var recovered = repository.claim(properties).orElseThrow();
+            assertNotEquals(stale.leaseToken(), recovered.leaseToken());
+            assertFalse(repository.succeed(stale));
+            expire(id);
+        }
+        // A DELETE may have been accepted before a crash, even on the last attempt.
+        // Re-read Kubernetes instead of failing before discovering that it is now absent.
+        doReturn(true).when(provisioner).delete(any(), any(), any());
+        worker = new ProvisioningWorker(new WorkerRepository(jdbc), environments, provisioner, properties);
+        worker.poll();
+        assertEquals("DELETED", environmentStatus(id));
+        assertEquals("SUCCEEDED", operations.find(id).orElseThrow().status());
+    }
+
+    @Test
+    void deletionExpiredDuringHttpCannotPublishAndRecoveryObservesAbsence() {
+        UUID id = delete();
+        when(provisioner.delete(any(), any(), any())).thenAnswer(invocation -> {
+            assertTrue(((java.util.function.BooleanSupplier) invocation.getArgument(2)).getAsBoolean());
+            expire(id);
+            assertFalse(((java.util.function.BooleanSupplier) invocation.getArgument(2)).getAsBoolean());
+            return true;
+        });
+        worker.poll();
+        assertEquals("RUNNING", operations.find(id).orElseThrow().status());
+        assertEquals("DELETING", environmentStatus(id));
+        assertEquals(List.of("CLAIMED"), eventTypes(id));
+        doReturn(true).when(provisioner).delete(any(), any(), any());
+        worker.poll();
+        assertEquals("DELETED", environmentStatus(id));
+        assertEquals(List.of("CLAIMED", "CLAIMED", "SUCCEEDED"), eventTypes(id));
+    }
+
+    @Test
+    void terminatingNamespaceEventuallyFailsAtDurableDeadline() {
+        UUID id = delete();
+        worker.poll();
+        jdbc.update("UPDATE operations SET started_at = clock_timestamp() - interval '6 minutes' WHERE id = ?", id);
+        due(id);
+        worker.poll();
+        assertEquals("FAILED", operations.find(id).orElseThrow().status());
+        assertEquals("DELETION_TIMEOUT", operations.find(id).orElseThrow().failureCode());
+        assertEquals("Deletion did not complete within its limits.",
+                operations.find(id).orElseThrow().failureMessage());
+        assertEquals("DELETE_FAILED", environmentStatus(id));
+        verify(provisioner, times(1)).delete(any(), any(), any());
+    }
+
+    @Test
+    void simultaneousDeletionClaimersHaveOnlyOneLease() throws Exception {
+        UUID id = delete();
+        var pool = Executors.newFixedThreadPool(2);
+        var start = new CyclicBarrier(2);
+        try {
+            var first = pool.submit(() -> { start.await(); return repository.claim(properties); });
+            var second = pool.submit(() -> { start.await(); return repository.claim(properties); });
+            var one = first.get(10, TimeUnit.SECONDS);
+            var two = second.get(10, TimeUnit.SECONDS);
+            assertNotEquals(one.isPresent(), two.isPresent());
+            assertEquals(id, one.orElseGet(two::orElseThrow).id());
+            assertEquals(List.of("CLAIMED"), eventTypes(id));
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    private UUID delete() {
+        UUID createId = create();
+        when(provisioner.isReady(any())).thenReturn(true);
+        worker.poll();
+        UUID environmentId = operations.find(createId).orElseThrow().environmentId();
+        clearInvocations(provisioner);
+        return service.delete(environmentId).operationId();
     }
 
     private UUID create() {
