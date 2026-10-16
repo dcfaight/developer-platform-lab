@@ -13,9 +13,10 @@ function App() {
   }, [])
   const match = /^#environment\/([a-f0-9-]{36})$/i.exec(hash)
   return <div className="app-shell">
+    <a className="skip-link" href="#main-content">Skip to content</a>
     <header className="site-header"><a href="#environments" className="brand">DPL <span>Developer Platform Lab</span></a>
       <span className="read-only">Read-only portal</span></header>
-    <main>
+    <main id="main-content" tabIndex={-1}>
       <div className="intro"><p className="eyebrow">Local development platform</p>
         <h1>Environment control room</h1>
         <p>Follow environment readiness, provisioning progress, and failures in one place.</p>

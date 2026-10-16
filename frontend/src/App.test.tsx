@@ -29,7 +29,34 @@ describe('read-only portal', () => {
     expect(screen.getByRole('status').textContent).toBe('Loading…')
     await act(async () => resolve(json(paged([]))))
     expect(screen.getByRole('heading', { name: 'No environments yet' })).toBeTruthy()
+    expect(screen.getByText('python3 scripts/demo.py request --key interview-demo-1')).toBeTruthy()
+    expect(screen.queryByRole('complementary', { name: 'Current page summary' })).toBeNull()
     expect(screen.queryByRole('button', { name: /create|delete/i })).toBeNull()
+  })
+
+  it('summarizes only the loaded page, not the whole inventory or latest operation', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(paged([
+      { ...demoEnvironment, id: 'ready', status: 'READY' },
+      { ...demoEnvironment, id: 'requested', status: 'REQUESTED' },
+      demoEnvironment,
+      { ...demoEnvironment, id: 'failed', status: 'FAILED' },
+    ], { totalElements: 14, totalPages: 2 }))))
+    render(<App />)
+    const summary = await screen.findByRole('complementary', { name: 'Current page summary' })
+    expect(summary.textContent).toContain('This page only · 4 of 14 environments')
+    expect(summary.textContent).toContain('Not live health checks')
+    for (const [label, count] of [['Ready', '1'], ['In progress', '2'], ['Failed', '1']]) {
+      expect(within(summary).getByText(label).nextElementSibling?.textContent).toBe(count)
+    }
+  })
+
+  it('explains pending work even when an acceptance event is recorded', async () => {
+    window.history.replaceState(null, '', `/#environment/${demoEnvironment.id}`)
+    mockPortal({ ...demoOperation, status: 'PENDING' })
+    render(<App />)
+    expect(await screen.findByText(/Waiting for a worker.*WORKER_ENABLED=true/)).toBeTruthy()
+    expect(screen.getByRole('list', { name: 'Recorded progress events' }).textContent)
+      .toContain(demoOperation.events[0].message)
   })
 
   it('lists environment metadata and navigates to durable progress history', async () => {

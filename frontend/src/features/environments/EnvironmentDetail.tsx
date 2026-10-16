@@ -30,8 +30,9 @@ function OperationCard({ item }: { item: Operation }) {
       <div className="wide"><dt>Request correlation</dt><dd><code>{item.correlationId ?? 'Not available'}</code></dd></div>
     </dl>
     <h4>Progress history</h4>
-    {item.events.length === 0 ? <p className="muted">No progress events yet. The operation may be waiting for a worker.</p>
-      : <ol className="timeline">{item.events.map((event, index) => <li key={`${event.createdAt}-${index}`}>
+    {item.status === 'PENDING' && <p className="muted">Waiting for a worker. For local provisioning, start the backend with WORKER_ENABLED=true and the dedicated kind cluster.</p>}
+    {item.events.length === 0 ? <p className="muted">No progress events yet.</p>
+      : <ol className="timeline" aria-label="Recorded progress events">{item.events.map((event, index) => <li key={`${event.createdAt}-${index}`}>
         <div><strong>{event.type.replaceAll('_', ' ')}</strong><Timestamp value={event.createdAt} /></div>
         <p>{event.message}</p><code>{event.code}</code>
         {event.correlationId && <small>Request: {event.correlationId}</small>}
@@ -80,7 +81,7 @@ export function EnvironmentDetail({ id }: { id: string }) {
             ? <><Status value={item.latestOperation.status} /><code>{item.latestOperation.id}</code></>
             : 'No operations'}</dd></div>
         </dl>
-        <p className="muted">Expiry is metadata only; automatic cleanup is not implemented.</p>
+        <p className="muted">Readiness is the last recorded provisioning outcome, not continuous health monitoring. Expiry is metadata only; automatic cleanup is not implemented.</p>
       </>}
     </section>
     {item && <OperationHistory id={id} />}
