@@ -1,10 +1,22 @@
 # Architecture
 
 The [root README](../README.md#6-architecture) is the current design blueprint.
-The backend API and worker will initially share one Spring Boot application.
-PostgreSQL will persist environments, operations, and audit events; Kubernetes
-will supply observed workload state.
+The backend API and opt-in worker share one Spring Boot application, with
+separate request, operation/lease, worker, and Kubernetes packages.
 
-Current scaffold: a static React page, a bootable backend without API routes,
-and local PostgreSQL/kind configuration. Persistence and orchestration are not
-implemented. Add implementation diagrams and trade-offs here as work proceeds.
+1. The request transaction reserves the idempotency key and writes the environment,
+   operation, and audit event together. `202` means accepted, not provisioned.
+2. Workers use PostgreSQL row locks with `SKIP LOCKED` to claim due operations.
+   A new lease token fences each claim; expired claims are recoverable after restart.
+3. Kubernetes calls happen outside database transactions. Repeatable provisioning
+   reconciles only platform-owned resources in the dedicated local kind cluster.
+4. Fenced transactions persist progress, retries, completion, and failure events
+   alongside environment state. `READY` requires observed Deployment readiness.
+5. Operation detail exposes sanitized durable history and the original request
+   correlation ID. Raw Kubernetes errors and credentials are not returned.
+
+This is at-least-once processing, not distributed exactly-once execution.
+Lease expiry can overlap Kubernetes calls; ownership checks and optimistic
+concurrency make repeat execution safe. The lease token protects database writes,
+not the Kubernetes API. There is no deletion, periodic post-success health
+reconciliation, production RBAC, authentication expansion, or frontend API wiring.

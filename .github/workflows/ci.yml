@@ -44,6 +44,29 @@ jobs:
         run: docker info
       - run: ./mvnw --batch-mode verify
 
+  provisioning:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: developer-platform-lab
+          config: infra/kind/cluster.yaml
+      - name: Exercise approved provisioning against real kind
+        env:
+          PLATFORM_KIND_TEST: 'true'
+        run: ./mvnw --batch-mode -Dtest=KindProvisioningTests,KindWorkerFlowTests test
+
   scaffold:
     runs-on: ubuntu-latest
     steps:

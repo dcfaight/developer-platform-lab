@@ -1,9 +1,9 @@
 # API contract
 
 The persistent backend slice implements the routes below under `/api/v1`.
-It records requests, not running workloads: environments remain `REQUESTED`
-and operations remain `PENDING`. There is no worker, Kubernetes provisioning,
-deletion, expiration cleanup, or events endpoint. The broader
+Requests are accepted separately from infrastructure readiness. An opt-in worker
+provisions the approved sample in local kind and exposes progress in operation
+detail. There is no deletion, expiration cleanup, or environment events endpoint. The broader
 [blueprint](../README.md#9-proposed-rest-api) describes future behavior.
 
 ## Create an environment
@@ -40,8 +40,8 @@ Unknown JSON fields are rejected. A successful request returns `202 Accepted`,
 
 `expiresAt` is the creation time plus the requested TTL. It is persisted
 metadata only; passing that time does not trigger cleanup in this slice.
-`sample-service` is an approved identifier allowlist only; no deployed template
-implementation exists yet.
+`sample-service` is the only approved template, mapped to a fixed sample
+Deployment/image by the worker. No arbitrary manifests or images are accepted.
 
 ### Durable idempotency and atomicity
 
@@ -97,7 +97,9 @@ from a consistent database snapshot. A valid page beyond the last page returns a
 ```
 
 List `items` use this same DTO. The namespace is `env-` followed by the
-environment UUID with hyphens removed; no Kubernetes namespace is created.
+environment UUID with hyphens removed. Worker-enabled provisioning creates this
+namespace only if it is absent or already owned by this environment. Environment
+status progresses through `REQUESTED`, `PROVISIONING`, and `READY` or `FAILED`.
 
 ## Read an operation
 
@@ -115,13 +117,54 @@ environment UUID with hyphens removed; no Kubernetes namespace is created.
   "startedAt": null,
   "completedAt": null,
   "createdAt": "2026-10-16T05:00:00Z",
-  "updatedAt": "2026-10-16T05:00:00Z"
+  "updatedAt": "2026-10-16T05:00:00Z",
+  "failureCode": null,
+  "failureMessage": null,
+  "progressStep": "ACCEPTED",
+  "correlationId": "94257154-484e-4c67-aed2-8958854c7e6a",
+  "events": []
 }
 ```
 
 Timestamps are ISO-8601 instants. Initially `nextAttemptAt = createdAt`,
 `attemptCount = 0`, and the three nullable lifecycle timestamps are `null`.
-There is no operation execution or state transition yet.
+Operations transition from `PENDING` to `RUNNING`, then `SUCCEEDED` or `FAILED`.
+Transient failures return to `PENDING` with a future `nextAttemptAt`; expired
+`RUNNING` leases can be reclaimed. The acceptance response (including idempotent
+replays) always retains the original accepted states; poll this endpoint for
+the current state. `READY` is never inferred from request acceptance or merely
+creating Kubernetes objects.
+
+Operation detail also includes progress, failure, request correlation, and
+durable events (see below). Terminal failure messages are fixed sanitized
+summaries, not Kubernetes response bodies, kubeconfig contents, or stack traces.
+`completedAt` is populated only for terminal outcomes. All timestamps are UTC.
+
+| Field | Meaning |
+|---|---|
+| `attemptCount` | Provisioning attempts, including reclaimed abandoned attempts; readiness-only polls do not increment it. |
+| `progressStep` | Current worker step, including `ACCEPTED`, `PROVISIONING`, `WAITING`, `RETRY`, `READY`, or `FAILED`. |
+| `failureCode`, `failureMessage` | Nullable sanitized last failure summary; retries can have a summary before reaching a terminal state. |
+| `correlationId` | Server-generated ID of the original acceptance request; older migrated records may have `null`. A replay has its own response `X-Request-Id` without replacing this original correlation. |
+| `events` | Ordered, durable worker events with `type`, `code`, `message`, `correlationId`, and UTC `createdAt`. No raw Kubernetes event/log stream is returned. |
+
+Event types include `CLAIMED`, `PROVISIONED`, `WAITING`, `RETRY`, `SUCCEEDED`,
+and `FAILED`. Each state change and its event commit atomically. Readiness waits
+are separate from transient failure retries; they do not exhaust the error budget.
+`READINESS_TIMEOUT` and `ATTEMPTS_EXHAUSTED` report bounded execution/recovery
+limits. No lease tokens or Kubernetes credentials are exposed.
+
+Worker failure codes include:
+
+| Code | Handling |
+|---|---|
+| `KUBERNETES_UNAVAILABLE` | Transient transport, conflict, throttling, or server error; bounded retry. |
+| `KUBERNETES_REQUEST_REJECTED` | Non-retryable Kubernetes request/permission failure. |
+| `KUBERNETES_VALIDATION_FAILED` | Invalid persisted provisioning input; fail without provisioning. |
+| `KUBERNETES_OWNERSHIP_CONFLICT` | Resource is not an active, owned platform resource; never adopt it. |
+| `READINESS_TIMEOUT` | Initial provisioning did not reach readiness before its deadline. |
+| `ATTEMPTS_EXHAUSTED` | Recovered work exhausted its provisioning attempts. |
+| `INTERNAL_ERROR` | Unexpected failure with a fixed sanitized summary. |
 
 Both detail routes require UUID identifiers. A malformed identifier returns
 `400`; a valid UUID with no record returns `404`.

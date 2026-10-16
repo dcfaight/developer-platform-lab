@@ -19,3 +19,13 @@ server:
     include-message: never
     include-stacktrace: never
     include-binding-errors: never
+
+platform:
+  worker:
+    enabled: ${WORKER_ENABLED:false}
+    poll-delay-ms: 1000
+    lease-duration: 30s
+    max-attempts: 5
+    retry-backoff: 2s
+    readiness-poll-interval: 5s
+    readiness-timeout: 5m
