@@ -90,9 +90,17 @@ Only backend-sanitized summaries are available; messages render as text, not HTM
 Polling and offset pagination are intended for a small local demo, not a large
 multi-user service. No consistent snapshot across separate HTTP requests is promised.
 
-`npm run build` creates static assets in `dist/`. Vite's API proxy is for local
-development; serving that bundle elsewhere requires a same-origin reverse proxy
-for `/api/v1` to the backend. Vite preview alone is not a production deployment.
-Keep both services local/trusted. Credentials are sent as HTTP Basic on each
-mutation, so any non-loopback deployment would additionally need TLS; this is not
-a production security boundary.
+`npm run build` creates static assets in `dist/`. Vite's API proxy and preview
+are for local development, not production serving.
+The [container deployment](../infra/README.md#hardened-single-host-deployment-api-only)
+builds that same bundle with `npm ci`, then serves only static assets and
+same-origin `/api/v1/` through non-root nginx on TLS port 8443. No credentials
+or API URLs are baked into the bundle. Certificates are mounted read-only at
+runtime; there is no plaintext published listener. nginx uses bounded `/tmp`,
+disables access logging (including credential-bearing request query strings),
+and sets HSTS, nosniff, frame-denial and referrer headers. Its internal HTTP
+`/healthz` checks nginx only, not backend or database readiness.
+
+Keep this deployment restricted to trusted users: API reads remain anonymous,
+and Basic authentication is not SSO, per-owner authorization, or public-service
+hardening. The host-run local workflow above is unchanged.

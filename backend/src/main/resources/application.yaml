@@ -20,6 +20,21 @@ server:
     include-stacktrace: never
     include-binding-errors: never
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+      show-components: never
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db
+
 platform:
   worker:
     enabled: ${WORKER_ENABLED:false}

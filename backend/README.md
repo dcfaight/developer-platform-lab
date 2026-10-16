@@ -55,6 +55,28 @@ these same `DB_*` variables in the run configuration.
 No Kubernetes cluster is required for API-only use. No CORS configuration is
 added; keep this API in a trusted local environment (loopback only).
 
+## Container deployment and probes
+
+The [deployment runbook](../infra/README.md#hardened-single-host-deployment-api-only)
+uses the multi-stage Dockerfile and `deploy` profile. The image contains a Java 17
+JRE, the packaged application, and curl for health checks, not Maven or a JDK.
+It runs as UID/GID `10001`, with a read-only root filesystem and bounded `/tmp`
+in Compose. Base images are digest-pinned; Maven Wrapper and dependency versions
+come from this repository. Rebuild and update pins regularly for security fixes.
+
+The profile requires explicit `DB_URL`, `DB_USERNAME`, and `DB_PASSWORD`, binds
+`0.0.0.0:8080` **only inside the private container network**, disables the kind
+worker, ignores forwarded headers, and allows 20 seconds for graceful shutdown
+(Compose waits 30 seconds). Never publish that HTTP port or mount a kubeconfig.
+The default host-run profile still binds loopback and supports the kind worker.
+
+`GET /actuator/health/liveness` and `GET /actuator/health/readiness` are anonymous,
+status-only probes (`{"status":"UP"}`); broader Actuator paths remain protected.
+Readiness includes PostgreSQL connectivity and returns `503` when unavailable;
+liveness deliberately does not depend on the database. Neither measures worker
+progress or provisioned workload health. The TLS proxy does not expose Actuator.
+Only health is exposed by Actuator; no environment/configuration dump is enabled.
+
 ## Authentication and authorization
 
 Mutations require HTTP Basic credentials for an account configured at startup.

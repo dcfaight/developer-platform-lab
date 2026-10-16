@@ -29,6 +29,11 @@ replay_pid*
 !.env.example
 *.local
 kubeconfig*
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
 
 # Build output and dependencies
 node_modules/
