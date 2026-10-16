@@ -403,6 +403,94 @@ allows it; pending/provisioning failures may leave resources for diagnosis.
 Never remove finalizers or bypass ownership checks to make a test pass.
 No successful run is implied by adding this check; record actual results.
 
+### Recorded lifecycle validation — 2026-10-16
+
+**PASS:** after merging [PR #14](https://github.com/dcfaight/developer-platform-lab/pull/14),
+the worker-enabled K3s path was manually validated on the disposable lab cluster
+using context `default` and HTTPS ingress `platform-test.local` at `192.168.1.5`.
+The create → provision → ready → authenticated delete → namespace cleanup lab
+goal is complete and working. This is not production readiness or evidence of an
+automated lifecycle-test run; backup/restore and restart persistence remain unverified.
+
+The recorded environment was `demo` (`fab18d99-7a86-4886-8960-31277137837f`),
+with namespace `env-fab18d997a864886896031277137837f`.
+
+| Check | Observed result |
+| --- | --- |
+| Apply and backend rollout | `kubectl --context default apply -k infra/kubernetes` reported unchanged resources; `kubectl --context default -n platform-lab rollout status deployment/backend --timeout=180s` completed successfully. |
+| Create operation `322165ac-f272-459f-9dff-cdcb5b0ce66b` | The existing pending create was processed after deployment: `SUCCEEDED`, `progressStep: READY`, `attemptCount: 1`, no failure code/message. Events were `CLAIMED → PROVISIONED → WAITING → CLAIMED → SUCCEEDED` (21:46:25–21:46:34 UTC). |
+| Namespace and sample workload | Namespace `Active`; `sample-service` Deployment `1/1` ready and available; pod `1/1 Running`, zero restarts. |
+| Authenticated API deletion | An OPERATOR's plaintext password was prompted for by curl; DELETE returned `DELETING` / `PENDING` with operation `c01c7741-033d-4117-8369-1b6de415a4d2`. Acceptance alone was not treated as cleanup. |
+| Final environment GET and namespace check | Environment `DELETED`; `latestOperation` was the delete operation with `SUCCEEDED` / `DELETED` (updated 21:55:26 UTC). `kubectl get namespace` returned `NotFound`. The API record remained as history. |
+
+To reproduce manually, first complete the setup above. Substitute your actual
+context, reachable ingress address/hostname, and matching trusted certificate.
+The recorded create was already pending; the POST below starts a **new** run.
+Use the configured operator username, not an example account; curl prompts for
+its plaintext password. Do not paste credentials into commands or commit them.
+
+```sh
+export K3S_CONTEXT=default
+export K3S_NODE_IP=192.168.1.5
+export K3S_HOST=platform-test.local
+read -r -p 'Configured operator username: ' OPERATOR_USERNAME
+: "${OPERATOR_USERNAME:?Set the configured operator username}"
+: "${TLS_DIR:?Set the directory containing the trusted ingress tls.crt}"
+
+curl --silent --show-error --fail --cacert "$TLS_DIR/tls.crt" \
+  --resolve "$K3S_HOST:443:$K3S_NODE_IP" -u "$OPERATOR_USERNAME" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: k3s-validation-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM" \
+  -d '{"name":"demo","templateId":"sample-service","ttlHours":8}' \
+  "https://$K3S_HOST/api/v1/environments"
+# Copy environmentId and operationId from this response, not the historical IDs.
+read -r -p 'environmentId: ' ENV_ID
+read -r -p 'Create operationId: ' CREATE_OPERATION_ID
+ENV_NAMESPACE="env-${ENV_ID//-/}"
+
+# Repeat until SUCCEEDED / READY; inspect CLAIMED, PROVISIONED and readiness events.
+curl --silent --show-error --fail --cacert "$TLS_DIR/tls.crt" \
+  --resolve "$K3S_HOST:443:$K3S_NODE_IP" \
+  "https://$K3S_HOST/api/v1/operations/$CREATE_OPERATION_ID" | python3 -m json.tool
+kubectl --context "$K3S_CONTEXT" get namespace "$ENV_NAMESPACE"
+kubectl --context "$K3S_CONTEXT" -n "$ENV_NAMESPACE" get deployments,pods
+
+# Only after creation succeeds and sample-service is 1/1 ready:
+curl --silent --show-error --fail --cacert "$TLS_DIR/tls.crt" \
+  --resolve "$K3S_HOST:443:$K3S_NODE_IP" -u "$OPERATOR_USERNAME" \
+  -X DELETE "https://$K3S_HOST/api/v1/environments/$ENV_ID"
+read -r -p 'Delete operationId from response: ' DELETE_OPERATION_ID
+# Repeat both GETs until SUCCEEDED / DELETED and environment status DELETED.
+curl --silent --show-error --fail --cacert "$TLS_DIR/tls.crt" \
+  --resolve "$K3S_HOST:443:$K3S_NODE_IP" \
+  "https://$K3S_HOST/api/v1/operations/$DELETE_OPERATION_ID" | python3 -m json.tool
+curl --silent --show-error --fail --cacert "$TLS_DIR/tls.crt" \
+  --resolve "$K3S_HOST:443:$K3S_NODE_IP" \
+  "https://$K3S_HOST/api/v1/environments/$ENV_ID" | python3 -m json.tool
+kubectl --context "$K3S_CONTEXT" get namespace "$ENV_NAMESPACE"
+# Expected final result: NotFound (nonzero exit), not a connectivity/auth error.
+```
+
+### Viewing the lab in OpenLens/Lens
+
+OpenLens, Lens, or a similar Kubernetes UI can browse this K3s cluster using a
+kubeconfig with the correct context and sufficient Kubernetes RBAC permissions.
+Environments are namespaces in **one cluster**, not separate clusters. Before
+deletion, browse the `env-…` namespace for `sample-service`, pods, and events;
+after successful cleanup that namespace is absent. `platform-lab` holds the
+portal, backend, and PostgreSQL.
+
+On the UI machine, first verify `kubectl --context "$K3S_CONTEXT" get nodes`
+using the same kubeconfig you will import/select in the UI. Its Kubernetes API
+server address (typically port 6443) must be reachable, with trusted CA data and
+valid credentials. A kubeconfig pointing at `127.0.0.1` on the K3s node will not
+work unchanged on another machine; use a reachable endpoint covered by the API
+server certificate and trusted LAN/VPN access. Portal ingress access or curl's
+`--resolve` does not provide Kubernetes API access. Keep kubeconfig private,
+prefer a least-privilege viewing identity, never disable certificate verification,
+and do not expose the API publicly just to connect a UI. UI connectivity was not
+part of the recorded validation.
+
 ### Concise local status report
 
 Record the cluster/context, image tags, observation time, and exact checks run.
@@ -440,8 +528,8 @@ backup recovery.
   service-account token. Only the backend receives the explicit worker projection.
   PostgreSQL retains its image's initialization privileges. These are
   useful defaults, not validated production hardening.
-- **TODO:** test backup/restore and restart persistence on K3s; run and record
-  authenticated lifecycle checks on the target K3s installation;
+- **TODO:** test backup/restore and restart persistence on K3s; run the automated
+  authenticated lifecycle check separately from the recorded manual validation;
   add network policies, database role separation, secret encryption/rotation,
-  certificate renewal and access review; validate the full environment lifecycle.
+  certificate renewal and access review.
   No expiration scheduler or cleanup-CLI TLS extension is included.
