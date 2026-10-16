@@ -2,7 +2,7 @@
 
 A hands-on internal developer platform for provisioning development environments, deploying a sample application, and understanding operational status through a self-service portal.
 
-> **Project status:** Persistent requests support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal supports create → observe → delete, with confirmation and ownership-checked asynchronous namespace removal. Manual API-driven expiration cleanup is available, dry-run by default. Mutations now require HTTP Basic sign-in for locally configured `OPERATOR`/`CLEANUP` accounts, and audit events record the authenticated user; reads stay anonymous. SSO, ownership/team authorization, continuous health monitoring, and production deployment hardening remain unimplemented. This is a production-minded lifecycle slice, not overall production readiness.
+> **Project status:** Persistent requests support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal supports create → observe → delete, with confirmation and ownership-checked asynchronous namespace removal. Manual API-driven expiration cleanup is available, dry-run by default. Mutations require HTTP Basic sign-in for locally configured `OPERATOR`/`CLEANUP` accounts, and audit events record the authenticated user; reads stay anonymous. A separate API-only container deployment now provides a TLS portal, non-root restricted app containers, private networking, and database-aware readiness. SSO, ownership/team authorization, continuous workload health monitoring, and production Kubernetes deployment remain unimplemented. This is production-minded hardening, not overall production readiness.
 >
 > Except where marked as available now, this README preserves the intended architecture and delivery blueprint, not a claim that the full platform is implemented.
 >
@@ -12,16 +12,20 @@ A hands-on internal developer platform for provisioning development environments
 
 | Implemented now | Future work, not demo claims |
 |---|---|
-| Portal creation and guarded asynchronous deletion; durable requests and ownership checks | Production deployment hardening |
+| Portal creation and guarded asynchronous deletion; durable requests and ownership checks | Production Kubernetes deployment and availability |
 | Opt-in leased worker provisioning an approved sample in local kind; manual expiration CLI | Scheduled expiration and continuous post-provisioning health monitoring |
 | Portal with page-local status counts, creation, details, and durable operation timelines | SSO/OIDC, ownership/team RBAC, and multi-user hardening |
-| HTTP Basic sign-in for configured accounts gating create/delete/cleanup; authenticated audit actor | TLS, read authorization, rate limiting, and account management |
+| HTTP Basic sign-in for configured accounts; authenticated audit actor; TLS container portal | Read authorization, rate limiting, SSO, and account management |
+| Non-root read-only app containers, private API/database, health checks and limits | Certificate automation, external secrets, database HA/backup automation |
 | Loading/error/retry states, sanitized failures, and request correlation | Custom templates/images, Services, and ingress |
 
 **Start here:** [local demo and troubleshooting runbook](docs/demo.md) for the
 repeatable request → provision → observe → delete walkthrough, safe replay, and manual
 lab reset. See [backend setup](backend/README.md#run-locally) and
 [frontend setup](frontend/README.md) for service-specific commands.
+For the separate single-host **API-only** container path, use the
+[deployment runbook](infra/README.md#hardened-single-host-deployment-api-only).
+It does not replace the host-run kind demo: container provisioning is disabled.
 
 ## 1. Project Purpose
 

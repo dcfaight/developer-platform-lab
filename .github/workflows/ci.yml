@@ -71,6 +71,21 @@ jobs:
           PLATFORM_KIND_TEST: 'true'
         run: ./mvnw --batch-mode -Dtest=KindProvisioningTests,KindWorkerFlowTests test
 
+  deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Build deploy images and exercise TLS, API auth, probes and restrictions
+        env:
+          PLATFORM_DEPLOY_TEST: 'true'
+        run: python -m unittest discover -s automation/tests -p test_deployment.py -v
+
   scaffold:
     runs-on: ubuntu-latest
     steps:

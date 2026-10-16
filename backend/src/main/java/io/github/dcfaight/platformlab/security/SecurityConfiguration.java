@@ -72,6 +72,8 @@ public class SecurityConfiguration {
                         .accessDeniedHandler(forbidden))
                 .authorizeHttpRequests(requests -> requests
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
+                        .requestMatchers(paths.matcher(HttpMethod.GET, "/actuator/health/liveness"),
+                                paths.matcher(HttpMethod.GET, "/actuator/health/readiness")).permitAll()
                         .requestMatchers(paths.matcher(HttpMethod.GET, "/api/v1/me")).authenticated()
                         .requestMatchers(paths.matcher(HttpMethod.POST, "/api/v1/environments"))
                         .hasRole(Role.OPERATOR.name())

@@ -6,6 +6,11 @@ Confirmed deletion then removes only the owned namespace and retains its history
 Acceptance is not readiness; `READY` means initial Deployment readiness was observed,
 not that the application is continuously monitored.
 
+This remains the full lifecycle demo. The separate
+[hardened container path](../infra/README.md#hardened-single-host-deployment-api-only)
+serves the portal/API with TLS but deliberately disables the host-only kind worker;
+do not use that API-only path to claim successful provisioning or deletion.
+
 ## Prerequisites and startup
 
 Use a trusted local machine with Bash, Python 3.12, Docker + Compose, kind, kubectl, Java 17,
