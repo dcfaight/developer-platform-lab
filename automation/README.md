@@ -156,7 +156,8 @@ See the demo for a real-clock create → expire → dry-run → execute → obse
 - **Real kind:** owned and legacy-owned namespace deletion/absence tests passed.
   The separate provisioning-readiness test failed: sample HTTP probes timed out,
   and CoreDNS was also unready. The remaining worker full-flow run was stopped
-  after that failure; it did not establish completed create-to-cleanup evidence.
+  after that failure; a separate targeted worker-flow attempt also failed
+  readiness. Neither established completed create-to-cleanup evidence.
   Do not count deletion-only proof, interrupted work, or the earlier opt-in skips
   as a successful expiration walkthrough. No probes/safeguards were weakened.
 - **Review/security:** a read-only safety review found no blocking defects, and

@@ -656,13 +656,33 @@ class PlatformLabApplicationTests {
                 seedEnvironment("DELETING", expired), "DELETING",
                 seedEnvironment("DELETED", expired), "DELETED");
 
-        runPythonCleanup(false);
+        Set<String> eligibleIds = new HashSet<>(eligible.stream().map(UUID::toString).toList());
+        JsonNode dryRun = runPythonCleanup(false);
+        assertCleanupSummary(dryRun, "dry-run", 2, 0, 6);
+        assertEquals(eligibleIds, jsonStrings(dryRun.path("selectedIds")));
+        assertEquals(0, dryRun.path("acceptedOperations").size());
         assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
         assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
         assertEquals("READY", get("/api/v1/environments/" + eligible.get(0)).json().path("status").asText());
         assertEquals("FAILED", get("/api/v1/environments/" + eligible.get(1)).json().path("status").asText());
 
-        runPythonCleanup(true);
+        JsonNode executed = runPythonCleanup(true);
+        assertCleanupSummary(executed, "execute", 2, 2, 6);
+        assertEquals(eligibleIds, jsonStrings(executed.path("selectedIds")));
+        Set<String> requestedIds = new HashSet<>();
+        Set<String> requestedOperations = new HashSet<>();
+        assertEquals(2, executed.path("acceptedOperations").size());
+        for (JsonNode accepted : executed.path("acceptedOperations")) {
+            String environmentId = uuid(accepted, "environmentId");
+            String operationId = uuid(accepted, "operationId");
+            assertTrue(requestedIds.add(environmentId), "Each eligible environment is requested once");
+            assertTrue(requestedOperations.add(operationId), "Each acceptance has its own durable operation");
+            assertEquals("202", accepted.path("source").asText());
+            assertEquals(environmentId, jdbc.queryForObject(
+                    "SELECT environment_id::text FROM operations WHERE id = ?", String.class,
+                    UUID.fromString(operationId)));
+        }
+        assertEquals(eligibleIds, requestedIds);
         for (UUID id : eligible) {
             assertEquals("DELETING", get("/api/v1/environments/" + id).json().path("status").asText());
             assertEquals(1, jdbc.queryForObject("""
@@ -676,9 +696,40 @@ class PlatformLabApplicationTests {
         }
         assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
         assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+
+        JsonNode repeated = runPythonCleanup(true);
+        assertCleanupSummary(repeated, "execute", 0, 0, 8);
+        assertTrue(repeated.path("selectedIds").isEmpty());
+        assertTrue(repeated.path("acceptedOperations").isEmpty());
+        assertEquals(3, repeated.path("skipReasons").path("DELETING").asInt());
+        assertEquals(requestedOperations,
+                new HashSet<>(jdbc.queryForList("SELECT id::text FROM operations", String.class)));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
     }
 
-    private void runPythonCleanup(boolean execute) throws Exception {
+    private void assertCleanupSummary(JsonNode summary, String mode, int eligible, int requested, int skipped) {
+        assertEquals(mode, summary.path("mode").asText());
+        assertTrue(summary.path("scanComplete").asBoolean());
+        assertEquals(8, summary.path("scanned").asInt());
+        assertEquals(eligible, summary.path("eligible").asInt());
+        assertEquals(requested, summary.path("requested").asInt());
+        assertEquals(skipped, summary.path("skipped").asInt());
+        assertEquals(0, summary.path("exitStatus").asInt());
+        for (String counter : List.of("duplicates", "failed", "unknown", "alreadyDeleting", "alreadyDeleted")) {
+            assertEquals(0, summary.path(counter).asInt(), counter);
+        }
+        assertTrue(summary.path("errors").isEmpty());
+    }
+
+    private Set<String> jsonStrings(JsonNode values) {
+        Set<String> result = new HashSet<>();
+        for (JsonNode value : values) {
+            assertTrue(result.add(value.asText()), "Duplicate JSON selection");
+        }
+        return result;
+    }
+
+    private JsonNode runPythonCleanup(boolean execute) throws Exception {
         Path script = Path.of("..", "automation", "cleanup_expired.py").toAbsolutePath().normalize();
         List<String> command = new ArrayList<>(List.of("python3", script.toString(), "--api-base-url",
                 "http://127.0.0.1:" + port + "/api/v1", "--json"));
@@ -690,7 +741,9 @@ class PlatformLabApplicationTests {
             assertTrue(process.waitFor(30, TimeUnit.SECONDS), "Python cleanup timed out");
             String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             assertEquals(0, process.exitValue(), output);
-            assertTrue(mapper.readTree(output).isObject(), output);
+            JsonNode summary = mapper.readTree(output);
+            assertTrue(summary.isObject(), output);
+            return summary;
         } finally {
             process.destroyForcibly();
         }
