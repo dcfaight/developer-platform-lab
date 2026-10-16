@@ -207,7 +207,8 @@ namespace `get/create/delete` and Deployment `get/create/update`. Dynamic
 namespaces require cluster-wide grants; Kubernetes RBAC cannot constrain these
 grants by ownership labels or an `env-` name prefix. Application ownership checks
 are not a security boundary against stolen worker credentials: a compromised
-backend could delete unrelated namespaces or create/modify Deployments elsewhere.
+backend could delete unrelated namespaces (including `platform-lab` or
+`kube-system`) or create/modify Deployments elsewhere.
 Use only a dedicated disposable lab cluster, not a shared or production cluster.
 There is no Secrets, pod exec, RBAC-management, wildcard, or cluster-admin grant.
 
@@ -262,6 +263,9 @@ The Kubernetes API must be reachable from the backend through cluster DNS and
 the `kubernetes` Service. Standard projected service-account tokens and the
 namespace CA ConfigMap must be available. The worker does not create sample
 Services or Ingresses; use a loopback Deployment port-forward to view the sample.
+If the backend is stuck mounting credentials, check that `kube-root-ca.crt` exists
+in `platform-lab` and inspect Pod events; it is normally published by the cluster's
+root-CA controller.
 
 ### Secrets and TLS
 

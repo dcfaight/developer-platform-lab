@@ -49,12 +49,15 @@ class KubernetesConfigurationTests(unittest.TestCase):
 
     def test_worker_permissions_are_explicit_and_do_not_grant_secret_or_rbac_access(self):
         rbac = (MANIFESTS / "worker-rbac.yaml").read_text()
-        self.assertIn("resources: [namespaces]\n    verbs: [get, create, delete]", rbac)
-        self.assertIn("resources: [deployments]\n    verbs: [get, create, update]", rbac)
-        self.assertEqual(2, rbac.count("resources:"))
-        self.assertEqual(2, rbac.count("verbs:"))
-        for forbidden in ("*", "secrets", "pods", "roles", "bind", "escalate", "impersonate"):
-            self.assertNotIn(forbidden, rbac)
+        rules = rbac.split("rules:\n", 1)[1].split("---", 1)[0]
+        self.assertEqual(
+            '  - apiGroups: [""]\n'
+            '    resources: [namespaces]\n'
+            '    verbs: [get, create, delete]\n'
+            '  - apiGroups: [apps]\n'
+            '    resources: [deployments]\n'
+            '    verbs: [get, create, update]\n', rules)
+        self.assertEqual(1, rbac.count("rules:"))
 
 
 @unittest.skipUnless(os.environ.get("PLATFORM_K3S_TEST") == "true",
@@ -99,6 +102,10 @@ class KubernetesSmokeTests(unittest.TestCase):
             ("get", "secrets", "platform-lab", False),
             ("create", "pods/exec", "platform-lab", False),
             ("create", "rolebindings.rbac.authorization.k8s.io", "platform-lab", False),
+            ("update", "namespaces", None, False),
+            ("list", "namespaces", None, False),
+            ("delete", "deployments.apps", "worker-rbac-check", False),
+            ("watch", "deployments.apps", "worker-rbac-check", False),
         ):
             with self.subTest(verb=verb, resource=resource):
                 arguments = ["kubectl", "--context", self.context, "auth", "can-i",
@@ -190,7 +197,9 @@ class KubernetesLifecycleTests(unittest.TestCase):
     def cleanup_environment(self, environment_id):
         path = "/api/v1/environments/" + environment_id
         environment = self.get(path)
-        if environment["status"] in ("READY", "FAILED", "DELETE_FAILED", "DELETING"):
+        if environment["status"] == "DELETING":
+            self.wait(environment["latestOperation"]["id"])
+        elif environment["status"] in ("READY", "FAILED", "DELETE_FAILED"):
             status, deletion = self.request(path, "DELETE", authenticated=True)
             self.assertEqual(202, status)
             self.wait(deletion["operationId"])
