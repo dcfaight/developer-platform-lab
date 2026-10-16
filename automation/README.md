@@ -14,9 +14,25 @@ Start the matching backend from this revision using the
 # Read-only by default; --dry-run makes that intent explicit.
 python3 automation/cleanup_expired.py --dry-run
 python3 automation/cleanup_expired.py --api-base-url http://127.0.0.1:8080/api/v1 --json
-# Review the plan, then explicitly request deletion:
+# Review the plan, then explicitly request deletion with a CLEANUP account:
+export PLATFORM_CLEANUP_USERNAME=cleanup-bot
+read -r -s -p 'Cleanup password: ' PLATFORM_CLEANUP_PASSWORD; echo
+export PLATFORM_CLEANUP_PASSWORD
 python3 automation/cleanup_expired.py --execute --json
+unset PLATFORM_CLEANUP_PASSWORD
 ```
+
+Dry-run uses only anonymous reads and needs no credentials. `--execute` requires
+`PLATFORM_CLEANUP_USERNAME` and `PLATFORM_CLEANUP_PASSWORD` in the environment
+(never on the command line) for an account with the `CLEANUP` (or `OPERATOR`)
+role, [configured on the backend](../backend/README.md#authentication-and-authorization).
+Missing or malformed values exit `2` before any network request. Credentials are
+sent only as HTTP Basic on the guarded `DELETE` requests, never on GETs, and are
+never printed. A `CLEANUP` account can only send expiry-guarded deletes; the
+backend rejects it for creation and unguarded deletion. A `401`/`403` on DELETE
+is a definite rejection: the candidate is counted as failed (not unknown), it is
+not retried, other candidates continue, and the exit code is nonzero. Audit
+events record the cleanup account as the actor.
 
 Each command captures its own single UTC cutoff. The execute command discovers a
 fresh plan; it does not consume or guarantee the previous dry-run plan.
@@ -72,8 +88,9 @@ Credentials, non-loopback hosts, other schemes, query/fragment base URLs and
 non-API paths are rejected. There is no remote override. Environment proxy
 settings are not used, and **no redirects are followed**, including for DELETE.
 Never forward a public/shared service onto localhost to bypass this boundary.
-There is still no authentication/authorization, multi-user isolation, or deployment
-hardening. This is trusted-local manual tooling, not production readiness.
+Basic credentials over plain HTTP are acceptable only because of this loopback
+restriction. There is still no multi-user isolation, SSO, or deployment hardening.
+This is trusted-local manual tooling, not production readiness.
 
 ## Pagination and output
 
@@ -142,7 +159,10 @@ production TTL validation or operator database edits. Local fake-HTTP/subprocess
 tests exercise the real CLI transport; they are not real backend/DB or kind proof.
 See the demo for a real-clock create → expire → dry-run → execute → observe flow.
 
-### Evidence and remaining gates for this change
+### Evidence and remaining gates for the original cleanup change
+
+This record predates the authentication boundary; its "absent auth/authz" note
+is superseded by the credential requirements above.
 
 - **Python:** 64 stdlib behavioral tests passed, including actual subprocess CLI
   requests to a local fake HTTP server; compileall passed.

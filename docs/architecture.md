@@ -30,6 +30,9 @@ and consumes environment lists, details, and operation history through the Vite
 development proxy; it holds no Kubernetes credentials. The manually invoked
 Python expiration CLI defaults to dry-run and uses the same delete API, with a
 row-locked cutoff/state guard preventing terminal-failure retries. It has no SQL
-or Kubernetes access. There is no expiration scheduler, periodic post-success health reconciliation, production RBAC,
-or authentication/authorization. Namespace ownership is a resource-safety check,
-not a user identity or access policy.
+or Kubernetes access. Mutations require stateless HTTP Basic credentials for
+statically configured accounts (`OPERATOR` creates/deletes; `CLEANUP` may only
+send expiry-guarded deletes), and audit events record the authenticated username;
+reads remain anonymous and trusted-local. There is no expiration scheduler, periodic
+post-success health reconciliation, SSO, or production RBAC. Namespace ownership is
+a resource-safety check, not a user identity or access policy.

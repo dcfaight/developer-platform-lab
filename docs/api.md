@@ -123,8 +123,9 @@ reuses `platform.worker.readiness-timeout` as the overall deletion deadline and
 
 Ownership conflicts discovered in Kubernetes are asynchronous operation failures,
 not a claim that request acceptance validated live cluster ownership. These checks
-protect platform resources; they do **not** authenticate or authorize users.
-All callers remain trusted-local. Deletion removes the namespace and everything
+protect platform resources; they are separate from the user
+[authorization](#authentication-and-authorization) that DELETE requires.
+Any `OPERATOR` may delete any environment; there is no per-owner policy. Deletion removes the namespace and everything
 inside it, not the PostgreSQL environment or operation history.
 
 ## Read environments
@@ -297,6 +298,44 @@ are not trusted. Completion logs include request ID through MDC, HTTP method,
 status, and duration, without logging query strings, request bodies, or
 idempotency keys.
 
-No authentication or CORS policy is added. Audit writes use a fixed
-local-development actor, never a caller-provided actor header. This is not
-authenticated identity: use the API only in a trusted local environment.
+No CORS policy is added. Audit writes record the authenticated username, never
+a caller-provided actor header (see below).
+
+## Authentication and authorization
+
+The API uses stateless HTTP Basic authentication against accounts configured at
+backend startup ([configuration](../backend/README.md#authentication-and-authorization)).
+No session or cookie is created, and CSRF protection is not needed because
+credentials are never sent ambiently by the browser.
+
+| Request | Requirement |
+|---|---|
+| `GET`/`HEAD` reads under `/api/v1` (lists, detail, operations) | None (anonymous, trusted-local) |
+| `GET /api/v1/me` | Any authenticated account; returns `{"username":"alice","roles":["OPERATOR"]}` |
+| `POST /api/v1/environments` | Role `OPERATOR` |
+| `DELETE /api/v1/environments/{id}` | Role `OPERATOR` |
+| `DELETE /api/v1/environments/{id}?expiredBefore=…` | Role `OPERATOR` or `CLEANUP` |
+| Any other method or path | Role `OPERATOR` (fail closed) |
+
+Rejections happen before validation, idempotency reservation, or any write:
+
+| Status | Code | Meaning |
+|---|---|---|
+| `401` | `UNAUTHENTICATED` | Missing, malformed, or wrong credentials. |
+| `403` | `FORBIDDEN` | Valid credentials without the required role. |
+
+Both use the standard error body with `requestId` and the `X-Request-Id` header.
+`401` deliberately omits `WWW-Authenticate`, so browsers never show a native
+prompt or cache credentials. A rejected creation consumed nothing: retrying the
+same `Idempotency-Key` after authenticating is safe.
+
+`audit_events.actor` is the authenticated username for creation and deletion
+requests (including cleanup-CLI deletions, recorded as the `CLEANUP` account).
+Earlier rows keep `local-development`, which can no longer be configured as a
+username. Request completion logs do not record the actor.
+
+Not provided: TLS (plain Basic is acceptable only on loopback), SSO/OIDC, token
+expiry, rate limiting or lockout, runtime account management, read
+authorization, ownership/team-based authorization, or per-user idempotency
+namespaces (keys are global; another operator's replay returns the original
+acceptance without a new audit event).

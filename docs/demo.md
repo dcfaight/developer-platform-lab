@@ -12,7 +12,9 @@ Use a trusted local machine with Bash, Python 3.12, Docker + Compose, kind, kube
 Node.js 24 + npm 11, curl, and jq. Allow image pulls and Maven/npm downloads.
 Reserve ports 5432, 8080, and 5173 (8081 is optional for the sample).
 Commands start from the repository root unless stated otherwise.
-No authentication is implemented; do not expose these services publicly.
+Mutations require HTTP Basic sign-in for locally configured accounts; reads are
+anonymous. Credentials travel unencrypted, so keep every service on loopback and
+do not expose them publicly.
 
 1. Follow [backend local setup](../backend/README.md#run-locally) to create/edit
    your ignored `.env`, start PostgreSQL, and export `DB_*`. Do not start the
@@ -24,7 +26,13 @@ No authentication is implemented; do not expose these services publicly.
    kubectl --context kind-developer-platform-lab get nodes
    ```
 
-3. In the terminal with the `DB_*` exports, start the worker-enabled backend:
+3. In the terminal with the `DB_*` exports, configure an `OPERATOR` account (and,
+   for section 5, a `CLEANUP` account) as described in
+   [backend authentication](../backend/README.md#authentication-and-authorization):
+   generate a password hash with the documented Python one-liner and export
+   `PLATFORM_SECURITY_USERS_0_USERNAME`, `..._PASSWORDHASH`, and `..._ROLES`.
+   Remember the plaintext passwords yourself; only hashes are configured. Then
+   start the worker-enabled backend:
 
    ```sh
    export WORKER_ENABLED=true
@@ -49,7 +57,11 @@ No authentication is implemented; do not expose these services publicly.
 
 ## 1. Create from the portal
 
-1. Open http://127.0.0.1:5173 and choose **Create environment**.
+1. Open http://127.0.0.1:5173 and sign in with the `OPERATOR` account in the
+   panel at the top. The portal checks the credentials with `GET /api/v1/me` and
+   holds them only in page memory; reloading signs you out. Browsing works without
+   signing in, but the create and delete buttons stay disabled. Choose
+   **Create environment**.
 2. Enter a name using ASCII letters, digits, spaces, underscores, or hyphens,
    starting with a letter or digit. Choose a whole-number lifetime from 1 to 24
    hours; it defaults to 8. The only template is the approved `sample-service`.
@@ -77,14 +89,19 @@ Run the following in a **new Bash terminal**; keep it open for the observe step.
 `set -euo pipefail` stops this shell on a failed command rather than continuing
 with missing IDs. curl requests have bounded timeouts and fail on HTTP errors.
 
+curl prompts for the operator password on each mutation (`-u` with only a
+username), so it never appears in shell history or process arguments.
+
 ```bash
 set -euo pipefail
 API=http://127.0.0.1:8080/api/v1
+OPERATOR_USERNAME=alice   # your configured OPERATOR account
 DEMO_KEY="demo-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
 BODY='{"name":"interview-demo","templateId":"sample-service","ttlHours":1}'
 
 request_demo() {
   curl --fail-with-body --silent --show-error --connect-timeout 3 --max-time 15 \
+    -u "$OPERATOR_USERNAME" \
     "$API/environments" -H 'Content-Type: application/json' \
     -H "Idempotency-Key: $DEMO_KEY" -d "$BODY"
 }
@@ -107,6 +124,8 @@ printf 'Replay matched. Portal: http://127.0.0.1:5173/#environment/%s\n' "$ENVIR
 IDs; replay has the same IDs/body and `diff` prints nothing. Each new run generates
 a new key and creates one more environment; reuse the saved key/body to replay
 instead. A different body with the same key returns `409`, not a new environment.
+Without credentials the same POST returns `401` `UNAUTHENTICATED` and writes
+nothing. The audit event for this request records your username as the actor.
 
 ## 3. Observe with a bounded wait
 
@@ -158,7 +177,7 @@ kubectl --context kind-developer-platform-lab -n "$NAMESPACE" \
 
 ## 4. Delete safely and verify absence
 
-Stop any sample port-forward first. In the portal, open the environment detail,
+Stop any sample port-forward first. Signed in as an `OPERATOR`, open the environment detail,
 choose **Delete environment**, inspect the target, and confirm. The action is
 unavailable during creation or an active delete, and for deleted records.
 Acceptance means durable `DELETING`, not that Kubernetes removal is complete.
@@ -169,7 +188,7 @@ For the API-created environment, use the **same Bash terminal**:
 
 ```bash
 DELETE_ACCEPTED=$(curl --fail-with-body --silent --show-error \
-  --connect-timeout 3 --max-time 15 -X DELETE \
+  --connect-timeout 3 --max-time 15 -u "$OPERATOR_USERNAME" -X DELETE \
   "$API/environments/$ENVIRONMENT_ID")
 jq . <<< "$DELETE_ACCEPTED"
 DELETE_OPERATION_ID=$(jq -er '.operationId' <<< "$DELETE_ACCEPTED")
@@ -215,15 +234,18 @@ This is a **separate** create → expire → dry-run → execute → observe wal
 not a way to shorten application TTL. Keep the worker and dedicated kind cluster
 running. Use a disposable trusted-local inventory: execution selects **all**
 expired `READY`/`FAILED` records, not just the example. Review the dry-run IDs.
-There is no scheduler, auth/authz, or public/shared deployment support.
+There is no scheduler or public/shared deployment support. Creating needs the
+`OPERATOR` account; `--execute` needs the `CLEANUP` account in
+`PLATFORM_CLEANUP_USERNAME`/`PLATFORM_CLEANUP_PASSWORD` (dry-run needs none).
 
 In a new Bash terminal at the repository root:
 
 ```bash
 set -euo pipefail
 API=http://127.0.0.1:8080/api/v1
+OPERATOR_USERNAME=alice   # your configured OPERATOR account
 CREATED=$(curl --fail-with-body --silent --show-error \
-  --connect-timeout 3 --max-time 15 "$API/environments" \
+  --connect-timeout 3 --max-time 15 -u "$OPERATOR_USERNAME" "$API/environments" \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: expiry-demo-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM" \
   -d '{"name":"expiration-demo","templateId":"sample-service","ttlHours":1}')
@@ -262,6 +284,9 @@ python3 automation/cleanup_expired.py --api-base-url "$API" --dry-run --json
 TTL passing alone has made no cleanup request. After reviewing the inventory:
 
 ```bash
+export PLATFORM_CLEANUP_USERNAME=cleanup-bot   # your configured CLEANUP account
+read -r -s -p 'Cleanup password: ' PLATFORM_CLEANUP_PASSWORD; echo
+export PLATFORM_CLEANUP_PASSWORD
 if SUMMARY=$(python3 automation/cleanup_expired.py --api-base-url "$API" --execute --json); then
   :
 else
@@ -269,6 +294,7 @@ else
   echo 'Cleanup incomplete; inspect summary/history before rerunning.' >&2
   exit 1
 fi
+unset PLATFORM_CLEANUP_PASSWORD
 jq . <<< "$SUMMARY"
 DELETE_OPERATION_ID=$(jq -er --arg id "$ENVIRONMENT_ID" \
   '.acceptedOperations[] | select(.environmentId == $id) | .operationId' <<< "$SUMMARY")
