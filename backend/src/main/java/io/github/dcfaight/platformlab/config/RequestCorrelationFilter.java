@@ -9,10 +9,14 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
+// Runs before Spring Security so 401/403 responses also carry the request ID.
 @Component
+@Order(Ordered.HIGHEST_PRECEDENCE + 1)
 public class RequestCorrelationFilter extends OncePerRequestFilter {
     public static final String REQUEST_ID = "requestId";
     private static final Logger LOG = LoggerFactory.getLogger(RequestCorrelationFilter.class);

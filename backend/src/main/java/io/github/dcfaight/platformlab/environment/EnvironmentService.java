@@ -32,7 +32,8 @@ public class EnvironmentService {
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
-    public AcceptedEnvironmentResponse create(String key, CreateEnvironmentRequest request) {
+    public AcceptedEnvironmentResponse create(String key, CreateEnvironmentRequest request, String actor) {
+        requireActor(actor);
         if (key == null || !key.matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST",
                     "Idempotency-Key must be 1 to 128 characters: letters, digits, '.', '_', ':', '-' and start with a letter or digit.");
@@ -52,7 +53,7 @@ public class EnvironmentService {
                 "env-" + environmentId.toString().replace("-", ""), request.templateId(), "REQUESTED",
                 now.plus(request.ttlHours(), ChronoUnit.HOURS), now, now));
         operations.insert(operationId, environmentId, now);
-        audit.recordCreation(environmentId, operationId, now);
+        audit.recordCreation(environmentId, operationId, actor, now);
         return accepted(environmentId, operationId);
     }
 
@@ -65,12 +66,13 @@ public class EnvironmentService {
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
-    public AcceptedEnvironmentResponse delete(UUID id) {
-        return delete(id, null);
+    public AcceptedEnvironmentResponse delete(UUID id, String actor) {
+        return delete(id, null, actor);
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
-    public AcceptedEnvironmentResponse delete(UUID id, Instant expiredBefore) {
+    public AcceptedEnvironmentResponse delete(UUID id, Instant expiredBefore, String actor) {
+        requireActor(actor);
         if (expiredBefore != null && expiredBefore.isAfter(clock.instant())) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_REQUEST",
                     "expiredBefore must not be in the future.");
@@ -108,7 +110,7 @@ public class EnvironmentService {
         UUID operationId = UUID.randomUUID();
         operations.insertDelete(operationId, id, now);
         environments.deleting(id, now);
-        audit.recordDeletion(id, operationId, now);
+        audit.recordDeletion(id, operationId, actor, now);
         return new AcceptedEnvironmentResponse(id, operationId, "DELETING", "PENDING");
     }
 
@@ -126,6 +128,13 @@ public class EnvironmentService {
         long total = operations.count(id);
         return new OperationPage(operations.page(id, page, size).stream().map(operations::response).toList(),
                 page, size, total, (total + size - 1) / size);
+    }
+
+    private static void requireActor(String actor) {
+        // Mutations are only reachable through authenticated endpoints; there is no anonymous fallback actor.
+        if (actor == null || actor.isBlank()) {
+            throw new IllegalArgumentException("An authenticated actor is required.");
+        }
     }
 
     private static void validatePage(int page, int size) {

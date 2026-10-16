@@ -23,6 +23,7 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import io.github.dcfaight.platformlab.security.TestUsers;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -58,6 +59,7 @@ class PlatformLabApplicationTests {
         registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
+        TestUsers.register(registry);
     }
 
     @LocalServerPort
@@ -102,7 +104,8 @@ class PlatformLabApplicationTests {
         Instant before = Instant.now();
         ApiResponse created = request(port, "POST", "/api/v1/environments", """
                 {"name":"  Preview 123_-  ","templateId":"sample-service","ttlHours":3}
-                """, Map.of("Idempotency-Key", "create-complete", "X-Actor", "caller-selected-actor"));
+                """, Map.of("Idempotency-Key", "create-complete", "X-Actor", "caller-selected-actor",
+                "Authorization", TestUsers.basic(TestUsers.OPERATOR)));
         Instant after = Instant.now();
 
         assertEquals(202, created.status());
@@ -162,7 +165,7 @@ class PlatformLabApplicationTests {
         assertEquals(environmentId, audit.get("environment_id").toString());
         assertEquals(operationId, audit.get("operation_id").toString());
         assertEquals("ENVIRONMENT_REQUESTED", audit.get("action"));
-        assertEquals("local-development", audit.get("actor"));
+        assertEquals(TestUsers.OPERATOR, audit.get("actor"));
         assertNotNull(audit.get("id"));
         assertNotNull(audit.get("created_at"));
     }
@@ -395,7 +398,8 @@ class PlatformLabApplicationTests {
     void requestIdsAreServerGeneratedReturnedAndLogged(CapturedOutput output) throws Exception {
         String supplied = "caller-controlled-request-id";
         ApiResponse invalid = request(port, "POST", "/api/v1/environments",
-                payload("Preview", 8), Map.of("X-Request-Id", supplied));
+                payload("Preview", 8), Map.of("X-Request-Id", supplied,
+                        "Authorization", TestUsers.basic(TestUsers.OPERATOR)));
         assertError(invalid, 400);
         String requestId = invalid.header("X-Request-Id");
         assertNotEquals(supplied, requestId);
@@ -414,14 +418,18 @@ class PlatformLabApplicationTests {
         assertEquals(202, original.status());
 
         // A separate server/context proves replay does not depend on the original application's memory.
-        try (var restarted = new SpringApplicationBuilder(PlatformLabApplication.class).run(
+        List<String> arguments = new ArrayList<>(List.of(
                 "--server.port=0",
                 "--spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                 "--spring.datasource.username=" + POSTGRES.getUsername(),
-                "--spring.datasource." + "password" + "=" + POSTGRES.getPassword())) {
+                "--spring.datasource." + "password" + "=" + POSTGRES.getPassword()));
+        arguments.addAll(TestUsers.commandLineArguments());
+        try (var restarted = new SpringApplicationBuilder(PlatformLabApplication.class)
+                .run(arguments.toArray(String[]::new))) {
             int restartedPort = ((WebServerApplicationContext) restarted).getWebServer().getPort();
             ApiResponse replay = request(restartedPort, "POST", "/api/v1/environments",
-                    payload("Persistent", 8), Map.of("Idempotency-Key", "restart-persistent"));
+                    payload("Persistent", 8), Map.of("Idempotency-Key", "restart-persistent",
+                            "Authorization", TestUsers.basic(TestUsers.OPERATOR)));
             assertEquals(202, replay.status(), replay.body());
             assertEquals(original.json(), replay.json());
             assertEquals(original.header("Location"), replay.header("Location"));
@@ -695,7 +703,8 @@ class PlatformLabApplicationTests {
                     get("/api/v1/environments/" + fixture.getKey()).json().path("status").asText());
         }
         assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
-        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+        assertEquals(List.of(TestUsers.CLEANUP, TestUsers.CLEANUP), jdbc.queryForList(
+                "SELECT actor FROM audit_events WHERE action = 'ENVIRONMENT_DELETE_REQUESTED'", String.class));
 
         JsonNode repeated = runPythonCleanup(true);
         assertCleanupSummary(repeated, "execute", 0, 0, 8);
@@ -736,7 +745,14 @@ class PlatformLabApplicationTests {
         if (execute) {
             command.add("--execute");
         }
-        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+        var builder = new ProcessBuilder(command).redirectErrorStream(true);
+        builder.environment().remove("PLATFORM_CLEANUP_USERNAME");
+        builder.environment().remove("PLATFORM_CLEANUP_PASSWORD");
+        if (execute) {
+            builder.environment().put("PLATFORM_CLEANUP_USERNAME", TestUsers.CLEANUP);
+            builder.environment().put("PLATFORM_CLEANUP_PASSWORD", TestUsers.password(TestUsers.CLEANUP));
+        }
+        Process process = builder.start();
         try {
             assertTrue(process.waitFor(30, TimeUnit.SECONDS), "Python cleanup timed out");
             String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
@@ -762,7 +778,8 @@ class PlatformLabApplicationTests {
 
     private ApiResponse guardedDelete(UUID id, String cutoff) throws Exception {
         return request(port, "DELETE", "/api/v1/environments/" + id + "?expiredBefore="
-                + URLEncoder.encode(cutoff, StandardCharsets.UTF_8), null, Map.of());
+                + URLEncoder.encode(cutoff, StandardCharsets.UTF_8), null,
+                Map.of("Authorization", TestUsers.basic(TestUsers.OPERATOR)));
     }
 
     private void assertStateConflict(ApiResponse response) {
@@ -789,6 +806,112 @@ class PlatformLabApplicationTests {
         assertEquals(202, delete(id.toString()).status());
     }
 
+    @Test
+    void mutationsWithoutValidCredentialsAreRejectedWithoutWrites() throws Exception {
+        UUID id = seedEnvironment("READY", Instant.now().minusSeconds(3600));
+        String cutoff = URLEncoder.encode(Instant.now().minusSeconds(60).toString(), StandardCharsets.UTF_8);
+        List<Map<String, String>> credentials = List.of(Map.of(),
+                Map.of("Authorization", TestUsers.basic(TestUsers.OPERATOR, "wrong-password")),
+                Map.of("Authorization", TestUsers.basic("unknown-user", "anything")),
+                Map.of("Authorization", "Basic !!!not-base64"),
+                Map.of("Authorization", "Bearer " + TestUsers.password(TestUsers.OPERATOR)),
+                Map.of("X-Actor", TestUsers.OPERATOR, "X-Forwarded-User", TestUsers.OPERATOR));
+        for (Map<String, String> headers : credentials) {
+            Map<String, String> create = new java.util.HashMap<>(headers);
+            create.put("Idempotency-Key", "anonymous-create");
+            for (ApiResponse response : List.of(
+                    request(port, "POST", "/api/v1/environments", payload("Anonymous", 8), create),
+                    request(port, "DELETE", "/api/v1/environments/" + id, null, headers),
+                    request(port, "DELETE", "/api/v1/environments/" + id + "?expiredBefore=" + cutoff, null, headers),
+                    request(port, "PUT", "/api/v1/environments/" + id, payload("Anonymous", 8), headers),
+                    request(port, "GET", "/api/v1/me", null, headers))) {
+                assertUnauthenticated(response);
+            }
+        }
+        assertEquals("READY", get("/api/v1/environments/" + id).json().path("status").asText());
+        for (String table : List.of("operations", "idempotency_requests", "audit_events")) {
+            assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class), table);
+        }
+    }
+
+    @Test
+    void readsRemainAvailableWithoutCredentials() throws Exception {
+        UUID id = seedEnvironment("READY", Instant.now().plusSeconds(3600));
+        assertEquals(200, get("/api/v1/environments").status());
+        assertEquals(200, get("/api/v1/environments/" + id).status());
+        assertEquals(200, get("/api/v1/environments/" + id + "/operations").status());
+        assertError(get("/api/v1/operations/" + UUID.randomUUID()), 404);
+    }
+
+    @Test
+    void identityEndpointReportsAuthenticatedUserAndRoles() throws Exception {
+        for (var expected : Map.of(TestUsers.OPERATOR, "OPERATOR", TestUsers.CLEANUP, "CLEANUP").entrySet()) {
+            var me = request(port, "GET", "/api/v1/me", null,
+                    Map.of("Authorization", TestUsers.basic(expected.getKey())));
+            assertEquals(200, me.status(), me.body());
+            assertFields(me.json(), "username", "roles");
+            assertEquals(expected.getKey(), me.json().path("username").asText());
+            assertEquals(1, me.json().path("roles").size());
+            assertEquals(expected.getValue(), me.json().path("roles").get(0).asText());
+            assertTrue(me.header("Set-Cookie").isEmpty(), "Authentication must stay stateless");
+        }
+    }
+
+    @Test
+    void cleanupRoleMayOnlyRequestExpiryGuardedDeletion() throws Exception {
+        Map<String, String> cleanup = Map.of("Authorization", TestUsers.basic(TestUsers.CLEANUP));
+        Map<String, String> create = Map.of("Authorization", TestUsers.basic(TestUsers.CLEANUP),
+                "Idempotency-Key", "cleanup-create");
+        assertForbidden(request(port, "POST", "/api/v1/environments", payload("Cleanup", 8), create));
+        UUID unexpired = seedEnvironment("READY", Instant.now().plusSeconds(3600));
+        assertForbidden(request(port, "DELETE", "/api/v1/environments/" + unexpired, null, cleanup));
+        UUID expired = seedEnvironment("READY", Instant.now().minusSeconds(3600));
+        assertForbidden(request(port, "DELETE", "/api/v1/environments/" + expired, null, cleanup));
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM operations", Integer.class));
+
+        String cutoff = URLEncoder.encode(Instant.now().minusSeconds(60).toString(), StandardCharsets.UTF_8);
+        assertStateConflict(request(port, "DELETE", "/api/v1/environments/" + unexpired
+                + "?expiredBefore=" + cutoff, null, cleanup));
+        assertError(request(port, "DELETE", "/api/v1/environments/" + expired + "?expiredBefore=", null, cleanup), 400);
+        var accepted = request(port, "DELETE", "/api/v1/environments/" + expired + "?expiredBefore=" + cutoff,
+                null, cleanup);
+        assertEquals(202, accepted.status(), accepted.body());
+        assertEquals(TestUsers.CLEANUP, jdbc.queryForObject("SELECT actor FROM audit_events WHERE operation_id = ?",
+                String.class, UUID.fromString(uuid(accepted.json(), "operationId"))));
+        assertEquals("READY", get("/api/v1/environments/" + unexpired).json().path("status").asText());
+    }
+
+    @Test
+    void auditEventsRecordEachAuthenticatedRequester() throws Exception {
+        var created = post("audit-identity", payload("Audit identity", 8));
+        assertEquals(202, created.status(), created.body());
+        UUID id = UUID.fromString(uuid(created.json(), "environmentId"));
+        // An idempotent replay by another operator returns the original acceptance and adds no audit event.
+        var replay = request(port, "POST", "/api/v1/environments", payload("Audit identity", 8),
+                Map.of("Idempotency-Key", "audit-identity", "Authorization", TestUsers.basic(TestUsers.SECOND_OPERATOR)));
+        assertEquals(202, replay.status(), replay.body());
+        assertEquals(created.json(), replay.json());
+        finishCreation(id, "READY");
+        var deleted = request(port, "DELETE", "/api/v1/environments/" + id, null,
+                Map.of("Authorization", TestUsers.basic(TestUsers.SECOND_OPERATOR)));
+        assertEquals(202, deleted.status(), deleted.body());
+        assertEquals(List.of("ENVIRONMENT_REQUESTED:" + TestUsers.OPERATOR,
+                "ENVIRONMENT_DELETE_REQUESTED:" + TestUsers.SECOND_OPERATOR), jdbc.queryForList(
+                "SELECT action || ':' || actor FROM audit_events ORDER BY created_at, action DESC", String.class));
+    }
+
+    private void assertUnauthenticated(ApiResponse response) {
+        assertError(response, 401);
+        assertEquals("UNAUTHENTICATED", response.json().path("code").asText());
+        assertTrue(response.header("WWW-Authenticate").isEmpty(), "Browsers must not be prompted to cache credentials");
+        assertTrue(response.header("Set-Cookie").isEmpty());
+    }
+
+    private void assertForbidden(ApiResponse response) {
+        assertError(response, 403);
+        assertEquals("FORBIDDEN", response.json().path("code").asText());
+    }
+
     private void finishCreation(UUID id, String status) {
         jdbc.update("UPDATE operations SET status = ?, completed_at = now() WHERE environment_id = ?",
                 "READY".equals(status) ? "SUCCEEDED" : "FAILED", id);
@@ -796,7 +919,8 @@ class PlatformLabApplicationTests {
     }
 
     private ApiResponse delete(String id) throws Exception {
-        return request(port, "DELETE", "/api/v1/environments/" + id, null, Map.of());
+        return request(port, "DELETE", "/api/v1/environments/" + id, null,
+                Map.of("Authorization", TestUsers.basic(TestUsers.OPERATOR)));
     }
 
     private void assertAtomicRollback(String table) throws Exception {
@@ -894,8 +1018,10 @@ class PlatformLabApplicationTests {
     }
 
     private ApiResponse post(String key, String body) throws Exception {
-        return request(port, "POST", "/api/v1/environments", body,
-                key == null ? Map.of() : Map.of("Idempotency-Key", key));
+        String authorization = TestUsers.basic(TestUsers.OPERATOR);
+        return request(port, "POST", "/api/v1/environments", body, key == null
+                ? Map.of("Authorization", authorization)
+                : Map.of("Idempotency-Key", key, "Authorization", authorization));
     }
 
     private ApiResponse get(String path) throws Exception {

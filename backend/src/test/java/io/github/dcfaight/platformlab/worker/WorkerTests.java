@@ -353,7 +353,7 @@ class WorkerTests {
         expire(id);
         var recovered = repository.claim(properties).orElseThrow();
         assertTrue(repository.fail(recovered, "FAILED", "Creation failed."));
-        var accepted = service.delete(stale.environmentId());
+        var accepted = service.delete(stale.environmentId(), "worker-test");
         assertEquals("DELETING", accepted.environmentStatus());
         assertFalse(leaseValid.getAsBoolean());
         assertFalse(repository.provisioned(stale));
@@ -389,7 +389,7 @@ class WorkerTests {
         assertEquals("DELETE_FAILED", environmentStatus(id));
         assertEquals(List.of("CLAIMED", "RETRY", "CLAIMED", "RETRY", "CLAIMED", "FAILED"), eventTypes(id));
         UUID environmentId = operations.find(id).orElseThrow().environmentId();
-        var retry = service.delete(environmentId);
+        var retry = service.delete(environmentId, "worker-test");
         assertNotEquals(id, retry.operationId());
         doReturn(true).when(provisioner).delete(any(), any(), any());
         worker.poll();
@@ -506,12 +506,12 @@ class WorkerTests {
         worker.poll();
         UUID environmentId = operations.find(createId).orElseThrow().environmentId();
         clearInvocations(provisioner);
-        return service.delete(environmentId).operationId();
+        return service.delete(environmentId, "worker-test").operationId();
     }
 
     private UUID create() {
         return service.create(UUID.randomUUID().toString(),
-                new CreateEnvironmentRequest("Worker test", "sample-service", 1)).operationId();
+                new CreateEnvironmentRequest("Worker test", "sample-service", 1), "worker-test").operationId();
     }
 
     private void expire(UUID id) {
