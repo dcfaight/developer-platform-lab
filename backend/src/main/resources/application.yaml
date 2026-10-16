@@ -1,0 +1,7 @@
+spring:
+  application:
+    name: developer-platform-lab
+
+server:
+  address: 127.0.0.1
+  port: 8080
