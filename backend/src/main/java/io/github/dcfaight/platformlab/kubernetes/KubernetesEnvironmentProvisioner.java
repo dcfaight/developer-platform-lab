@@ -55,9 +55,6 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
     public void provision(EnvironmentRecord environment, UUID createOperationId, BooleanSupplier leaseValid) {
         execute(() -> {
             validate(environment);
-            if (!leaseValid.getAsBoolean()) {
-                return null;
-            }
             Namespace namespace = client.namespaces().withName(environment.namespace()).get();
             if (namespace == null) {
                 var labels = new java.util.HashMap<>(ownership(environment));

@@ -46,13 +46,17 @@ class KubernetesEnvironmentProvisionerTests {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", this::handle);
         server.start();
+        provisioner = newProvisioner();
+    }
+
+    private KubernetesEnvironmentProvisioner newProvisioner() {
         Config config = Config.empty();
         config.setMasterUrl("http://127.0.0.1:" + server.getAddress().getPort());
         config.setRequestRetryBackoffLimit(0);
         config.setRequestTimeout(2000);
         config.setHttpProxy(null);
         config.setHttpsProxy(null);
-        provisioner = new KubernetesEnvironmentProvisioner(LocalKubernetesClient.build(config));
+        return new KubernetesEnvironmentProvisioner(LocalKubernetesClient.build(config));
     }
 
     @AfterEach
@@ -82,6 +86,40 @@ class KubernetesEnvironmentProvisionerTests {
         assertFalse(pod.getAutomountServiceAccountToken());
         assertTrue(pod.getSecurityContext().getRunAsNonRoot());
         provisioner.provision(environment);
+        assertEquals(2, writes);
+    }
+
+    @Test
+    void restartAfterAcceptedProvisioningObservesResourcesWithoutAnotherWrite() {
+        provisioner.provision(environment, createOperationId);
+        String uid = namespace.getMetadata().getUid();
+        provisioner.close();
+        provisioner = newProvisioner();
+
+        provisioner.provision(environment, createOperationId, () -> {
+            fail("Recovery of matching resources must not request another mutation");
+            return false;
+        });
+        assertEquals(uid, namespace.getMetadata().getUid());
+        assertEquals(2, writes);
+    }
+
+    @Test
+    void restartAfterNamespaceCreationOnlyCreatesMissingDeployment() {
+        var checks = new java.util.concurrent.atomic.AtomicInteger();
+        provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() == 1);
+        assertNotNull(namespace);
+        assertNull(deployment);
+        assertEquals(1, writes);
+        String uid = namespace.getMetadata().getUid();
+        provisioner.close();
+        provisioner = newProvisioner();
+
+        provisioner.provision(environment, createOperationId, () -> true);
+        assertNotNull(deployment);
+        assertEquals(uid, namespace.getMetadata().getUid());
+        assertEquals(2, writes);
+        provisioner.provision(environment, createOperationId, () -> true);
         assertEquals(2, writes);
     }
 
@@ -233,16 +271,32 @@ class KubernetesEnvironmentProvisionerTests {
     }
 
     @Test
-    void createChecksLeaseBeforeReadsAndEachCreateMutation() {
+    void restartAfterAcceptedDeletionOnlyObservesUntilNamespaceIsAbsent() {
+        provisioner.provision(environment, createOperationId);
+        assertFalse(provisioner.delete(environment, createOperationId, () -> true));
+        provisioner.close();
+        provisioner = newProvisioner();
+
+        assertFalse(provisioner.delete(environment, createOperationId, () -> {
+            fail("Recovery must not repeat an accepted DELETE");
+            return false;
+        }));
+        namespace = null;
+        assertTrue(provisioner.delete(environment, createOperationId, () -> false));
+        assertEquals(1, deletes);
+    }
+
+    @Test
+    void createChecksLeaseBeforeEachCreateMutation() {
         provisioner.provision(environment, createOperationId, () -> false);
         assertNull(namespace);
         assertEquals(0, writes);
         var checks = new java.util.concurrent.atomic.AtomicInteger();
-        provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() < 2);
+        provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() < 1);
         assertNull(namespace);
         assertEquals(0, writes);
         checks.set(0);
-        provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() < 3);
+        provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() < 2);
         assertNotNull(namespace);
         assertNull(deployment);
         assertEquals(1, writes);
@@ -252,8 +306,7 @@ class KubernetesEnvironmentProvisionerTests {
     void createChecksLeaseBeforeReplacingDeployment() {
         provisioner.provision(environment, createOperationId);
         deployment.getSpec().setReplicas(2);
-        var checks = new java.util.concurrent.atomic.AtomicInteger();
-        provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() < 2);
+        provisioner.provision(environment, createOperationId, () -> false);
         assertEquals(2, writes);
         assertEquals(2, deployment.getSpec().getReplicas());
     }
