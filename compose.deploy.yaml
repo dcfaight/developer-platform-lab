@@ -68,9 +68,10 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    networks: [api]
+    networks: [edge, api]
 
 networks:
+  edge:
   api:
     internal: true
   database:

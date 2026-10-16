@@ -121,7 +121,9 @@ trusted-loopback HTTP only and is not extended to this TLS endpoint in this slic
   read-only roots, writable size-bounded tmpfs, dropped capabilities,
   `no-new-privileges`, CPU/memory/PID limits and init process signal forwarding.
   Only nginx can reach the API network; only the backend can reach the database
-  network. Both networks are internal; no backend or database port is published.
+  network. Those networks are internal; only the frontend also joins an edge
+  network so Docker can publish its loopback TLS port. No backend or database
+  port is published.
   Docker administrators and the host remain trusted. Compose provides limits,
   not scheduler resource requests or multi-host availability.
 - PostgreSQL reuses the existing pinned image and persistent volume definition

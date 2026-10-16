@@ -46,8 +46,11 @@ class DeploymentConfigurationTests(unittest.TestCase):
         for service in ("backend", "frontend"):
             self.assertTrue(services[service]["read_only"])
             self.assertEqual(["ALL"], services[service]["cap_drop"])
-        self.assertTrue(all(network["internal"]
-                            for network in configuration["networks"].values()))
+        for network in ("api", "database"):
+            self.assertTrue(configuration["networks"][network]["internal"])
+        self.assertEqual({"api", "edge"}, set(services["frontend"]["networks"]))
+        self.assertNotIn("edge", services["backend"]["networks"])
+        self.assertNotIn("edge", services["postgres"]["networks"])
 
 
 @unittest.skipUnless(os.environ.get("PLATFORM_DEPLOY_TEST") == "true",
