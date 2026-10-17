@@ -68,7 +68,8 @@ class OperationStatusTests {
         worker.provisioned(claim);
         worker.fail(claim, "KUBERNETES_FORBIDDEN", "Kubernetes access was denied.");
 
-        var response = client.send(HttpRequest.newBuilder(url("/api/v1/operations/" + id)).GET().build(),
+        var response = client.send(HttpRequest.newBuilder(url("/api/v1/operations/" + id))
+                .header("Authorization", TestUsers.basic(TestUsers.OPERATOR)).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode());
         var status = mapper.readTree(response.body());
@@ -250,7 +251,8 @@ class OperationStatusTests {
     }
 
     private HttpResponse<String> get(HttpClient client, String path) throws Exception {
-        return client.send(HttpRequest.newBuilder(url(path)).GET().build(), HttpResponse.BodyHandlers.ofString());
+        return client.send(HttpRequest.newBuilder(url(path))
+                .header("Authorization", TestUsers.basic(TestUsers.OPERATOR)).GET().build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private URI url(String path) {

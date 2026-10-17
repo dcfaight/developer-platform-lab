@@ -11,25 +11,30 @@ Start the matching backend from this revision using the
 [local setup](../backend/README.md#run-locally). From the repository root:
 
 ```sh
-# Read-only by default; --dry-run makes that intent explicit.
-python3 automation/cleanup_expired.py --dry-run
-python3 automation/cleanup_expired.py --api-base-url http://127.0.0.1:8080/api/v1 --json
-# Review the plan, then explicitly request deletion with a CLEANUP account:
+# Both modes need a configured CLEANUP account:
 export PLATFORM_CLEANUP_USERNAME=cleanup-bot
 read -r -s -p 'Cleanup password: ' PLATFORM_CLEANUP_PASSWORD; echo
 export PLATFORM_CLEANUP_PASSWORD
+# Read-only by default; --dry-run makes that intent explicit.
+python3 automation/cleanup_expired.py --dry-run
+python3 automation/cleanup_expired.py --api-base-url http://127.0.0.1:8080/api/v1 --json
+# Review the plan, then explicitly request deletion:
 python3 automation/cleanup_expired.py --execute --json
 unset PLATFORM_CLEANUP_PASSWORD
 ```
 
-Dry-run uses only anonymous reads and needs no credentials. `--execute` requires
+Both dry-run and `--execute` require
 `PLATFORM_CLEANUP_USERNAME` and `PLATFORM_CLEANUP_PASSWORD` in the environment
 (never on the command line) for an account with the `CLEANUP` (or `OPERATOR`)
 role, [configured on the backend](../backend/README.md#authentication-and-authorization).
 Missing or malformed values exit `2` before any network request. Credentials are
-sent only as HTTP Basic on the guarded `DELETE` requests, never on GETs, and are
-never printed. A `CLEANUP` account can only send expiry-guarded deletes; the
-backend rejects it for creation and unguarded deletion. A `401`/`403` on DELETE
+sent as HTTP Basic on every list/detail GET and guarded `DELETE`, and are never printed.
+`CLEANUP` is exclusive: it cannot be combined with any other role. It can discover
+all environments through list and detail reads, including legacy/unowned rows,
+and send expiry-guarded deletes; the backend rejects creation, unguarded deletion,
+operation history/direct operation reads, and metrics. This CLI uses only
+list/detail discovery and guarded deletes, not those denied
+diagnostic routes. A `401`/`403` on DELETE
 is a definite rejection: the candidate is counted as failed (not unknown), it is
 not retried, other candidates continue, and the exit code is nonzero. Audit
 events record the cleanup account as the actor.
@@ -80,7 +85,7 @@ headers/body. GET retries cover transport errors and HTTP 500/502/503/504, with
 redirect, or malformed acceptance. A bounded detail GET attempts to recover an
 accepted operation ID when the observed state is `DELETING`/`DELETED`. Otherwise
 the outcome is failed or unknown, with nonzero exit. A missing record (404) is not
-treated as proof of successful deletion. Inspect history before another run.
+treated as proof of successful deletion. An operator must inspect history before another run.
 
 Only literal loopback IPs and `localhost` (connected as `127.0.0.1`) are permitted;
 the default is `http://127.0.0.1:8080/api/v1`. HTTP and verified HTTPS are allowed.
@@ -89,7 +94,8 @@ non-API paths are rejected. There is no remote override. Environment proxy
 settings are not used, and **no redirects are followed**, including for DELETE.
 Never forward a public/shared service onto localhost to bypass this boundary.
 Basic credentials over plain HTTP are acceptable only because of this loopback
-restriction. There is still no multi-user isolation, SSO, or deployment hardening.
+restriction. Team authorization is enforced by the backend, but this does not
+establish strong tenant isolation, SSO, or production deployment hardening.
 This is trusted-local manual tooling, not production readiness.
 
 ## Pagination and output
@@ -128,11 +134,12 @@ JSON summary. `--json` emits only one JSON object. Important fields:
 |---|---|
 | 0 | Bounded traversal finished without actionable errors; requested work is still asynchronous. Skipped states, including `DELETE_FAILED`, require the documented operator policy. |
 | 1 | Incomplete scan, exceeded bound, invalid data, API/transport failure, or unknown deletion outcome. Check summary before rerunning. |
-| 2 | Invalid command-line arguments; no network requests made. |
+| 2 | Invalid command-line arguments or missing/malformed credentials; no network requests made. |
 
 ## Completion/recovery runbook
 
-For each emitted operation UUID, use `GET /api/v1/operations/{id}` and
+Sign in with an `OPERATOR` account (not the exclusive `CLEANUP` account). For each
+emitted operation UUID, use authenticated `GET /api/v1/operations/{id}` and
 `GET /api/v1/environments/{environmentId}` (or portal detail/history). Follow the
 [bounded observation/deletion walkthrough](../docs/demo.md). Success requires a
 `SUCCEEDED` delete operation and environment `DELETED`; only the worker can
@@ -140,7 +147,7 @@ confirm namespace absence. `PENDING` with the worker disabled is expected, not
 completion. Do not rerun DELETE to poll progress.
 
 For errors, correlate safe `requestId` with local backend logs. If recovery is
-unknown, inspect detail/history first. A later cleanup run skips active/completed
+unknown, have an operator inspect detail/history first. A later cleanup run skips active/completed
 deletes, and guarded requests cannot create new operations from `DELETE_FAILED`.
 For terminal failures inspect durable `failureCode`/events; fix ownership,
 connectivity or finalizer issues through the owning system, never strip finalizers
@@ -188,5 +195,5 @@ is superseded by the credential requirements above.
 
 Remaining gates: approved hosted CI, completed automated review/security scan,
 and a working local kind/browser walkthrough. Offset-page concurrency limitations,
-trusted-local-only access, and absent auth/authz/deployment hardening remain;
+trusted-local-only cleanup transport, and remaining deployment hardening remain;
 passing tests alone do not establish production readiness.

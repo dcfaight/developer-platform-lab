@@ -41,8 +41,10 @@ class SecurityConfigurationTests {
         assertEquals(List.of(), new PlatformSecurityProperties(null).users());
         var properties = new PlatformSecurityProperties(List.of(
                 new User("alice", BCRYPT, Set.of(Role.OPERATOR)),
-                new User("cleanup.bot@local", PYTHON_PBKDF2, Set.of(Role.CLEANUP, Role.OPERATOR))));
-        assertEquals(2, properties.users().size());
+                new User("cleanup.bot@local", PYTHON_PBKDF2, Set.of(Role.CLEANUP)),
+                new User("developer", BCRYPT, Set.of(Role.DEVELOPER)),
+                new User("admin", BCRYPT, Set.of(Role.DEVELOPER, Role.OPERATOR))));
+        assertEquals(4, properties.users().size());
         assertFalse(properties.users().get(0).toString().contains("$2a$"), "Hashes must not appear in logs");
     }
 
@@ -60,7 +62,10 @@ class SecurityConfigurationTests {
                 new User("alice", "{noop}plaintext-password", Set.of(Role.OPERATOR)),
                 new User("alice", "{sha256}abc", Set.of(Role.OPERATOR)),
                 new User("alice", BCRYPT, Set.of()),
-                new User("alice", BCRYPT, null)}) {
+                new User("alice", BCRYPT, null),
+                new User("alice", BCRYPT, Set.of(Role.CLEANUP, Role.OPERATOR)),
+                new User("alice", BCRYPT, Set.of(Role.CLEANUP, Role.DEVELOPER)),
+                new User("alice", BCRYPT, Set.of(Role.CLEANUP, Role.DEVELOPER, Role.OPERATOR))}) {
             var failure = assertThrows(IllegalStateException.class,
                     () -> new PlatformSecurityProperties(List.of(user)), user.toString());
             assertFalse(failure.getMessage().contains("plaintext-password"));

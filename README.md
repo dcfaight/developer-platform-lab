@@ -6,7 +6,7 @@ approximately 3,000 developers and separate production continuity sites; see
 the [Phase B architecture decision](docs/decisions/phase-b-target-architecture.md)
 and [operating model and delivery sequence](docs/operating-model-and-sequence.md).
 
-> **Project status:** Persistent requests support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal supports create → observe → delete, with confirmation and ownership-checked asynchronous namespace removal. Manual API-driven expiration cleanup is available, dry-run by default. Mutations require HTTP Basic sign-in for locally configured `OPERATOR`/`CLEANUP` accounts, and audit events record the authenticated user; reads stay anonymous. A separate API-only container deployment now provides a TLS portal, non-root restricted app containers, private networking, and database-aware readiness. SSO, ownership/team authorization, continuous workload health monitoring, and production Kubernetes deployment remain unimplemented. This is production-minded hardening, not overall production readiness.
+> **Project status:** Persistent requests support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal supports create → observe → delete, with confirmation and ownership-checked asynchronous namespace removal. Manual API-driven expiration cleanup is available, dry-run by default. All API reads and writes require HTTP Basic: `OPERATOR` has platform-wide access, `DEVELOPER` is limited to owned teams, and exclusive `CLEANUP` accounts have list/detail discovery and expiry-guarded deletion only. Audit events record the authenticated user; health probes remain anonymous. A separate API-only container deployment provides a TLS portal, non-root restricted app containers, private networking, and database-aware readiness. SSO, continuous workload health monitoring, and production-grade multi-tenant deployment remain unimplemented. This is production-minded hardening, not overall production readiness.
 >
 > Except where marked as available now, this README preserves the intended architecture and delivery blueprint, not a claim that the full platform is implemented.
 >
@@ -18,8 +18,8 @@ and [operating model and delivery sequence](docs/operating-model-and-sequence.md
 |---|---|
 | Portal creation and guarded asynchronous deletion; durable requests and ownership checks | Production Kubernetes deployment and availability |
 | Opt-in leased worker provisions an approved sample with per-namespace resource budgets in local kind; manual expiration CLI | Scheduled expiration and continuous post-provisioning health monitoring |
-| Portal with page-local status counts, creation, details, and durable operation timelines | SSO/OIDC, ownership/team RBAC, and multi-user hardening |
-| HTTP Basic sign-in for configured accounts; authenticated audit actor; TLS container portal | Read authorization, rate limiting, SSO, and account management |
+| Portal with page-local status counts, team-owned creation, details, and durable operation timelines | SSO/OIDC and stronger tenant isolation |
+| HTTP Basic for reads/writes; team authorization; authenticated audit actor; TLS container portal | Rate limiting, SSO, and account management |
 | Non-root read-only app containers, private API/database, health checks and limits | Certificate automation, external secrets, database HA/backup automation |
 | Loading/error/retry states, sanitized failures, and request correlation | Custom templates/images, Services, and ingress |
 
@@ -81,8 +81,8 @@ target architecture. They keep current security assumptions explicit.
 
 The portal submits creation requests through the existing API; it does not access Kubernetes directly.
 
-1. The developer opens the portal.
-2. They enter an environment name and choose an allowed lifetime.
+1. The developer opens the portal and signs in.
+2. They enter an environment name, select a member team, and choose an allowed lifetime.
 3. The portal submits a request to the backend.
 4. The backend records the environment and a provisioning operation.
 5. A background worker claims the operation.
@@ -101,8 +101,9 @@ The portal submits creation requests through the existing API; it does not acces
 Creation in progress cannot be deleted. Deletion retains environment and operation
 records for inspection. A failed deletion can be requested again after correcting
 the cause; ownership failures must never be bypassed. These resource-ownership
-checks are not user authorization. Deletion requires an authenticated `OPERATOR`
-(any operator may delete any environment; there is no per-owner policy).
+checks are separate from user authorization. `OPERATOR` may delete any environment;
+`DEVELOPER` may delete only environments owned by their current teams. Unowned
+legacy environments remain operator-managed.
 
 ### Expire an environment (available now, manually invoked)
 
@@ -298,6 +299,8 @@ Key fields:
 - `name`
 - `namespace`
 - `templateId`
+- `teamId` (nullable for legacy/unowned operator-managed environments)
+- `createdBy` (authenticated creator; nullable for legacy rows)
 - `status`
 - `expiresAt`
 - `createdAt`
@@ -392,7 +395,7 @@ Only the worker can verify readiness or namespace absence.
 - Creation and deletion return `202 Accepted` when asynchronous work is accepted.
 - Responses identify the environment and operation.
 - Creation supports an `Idempotency-Key` header.
-- Reusing a key with the same request returns the original result.
+- New idempotency keys are scoped by caller and team; equivalent replay returns the original result.
 - Reusing a key with different input returns a conflict.
 - Repeated deletion requests do not create competing deletion operations.
 - Errors include a stable code, useful message, and request identifier.
@@ -489,12 +492,14 @@ The Python expiration tool:
 6. Emits a structured summary and nonzero exit for errors/incomplete scans.
 
 Execution is manual and trusted-loopback only; no scheduler/CronJob is added.
-`--execute` authenticates with a `CLEANUP` account from environment variables;
-that role can only send expiry-guarded deletes.
+Both modes authenticate with a `CLEANUP` account from environment variables.
+This exclusive automation role has list/detail discovery of all environments
+(including legacy rows) and expiry-guarded deletes, but cannot read operation
+history, direct operations or metrics.
 `202` is acceptance, not namespace removal. Database/audit history is retained.
 See [commands, bounds, recovery and exit codes](automation/README.md) and the
 [create → expire walkthrough](docs/demo.md#5-manual-expiration-cleanup).
-SSO, ownership/team authorization, TLS, and deployment hardening remain prerequisites for broader use.
+SSO and stronger tenant/deployment hardening remain prerequisites for broader use.
 
 ## 14. Local Setup Plan
 
@@ -509,9 +514,9 @@ Follow the executable [local demo guide](docs/demo.md):
 The worker uses a fixed sample image; no custom application build/load is required.
 For API-only use, skip kind and leave the worker disabled; requests remain pending.
 
-Mutations require HTTP Basic credentials for accounts you configure at backend
-startup ([how](backend/README.md#authentication-and-authorization)); reads are
-anonymous. Plain HTTP Basic, anonymous reads, and missing deployment hardening
+All API reads and writes require HTTP Basic credentials for accounts you configure at backend
+startup ([how](backend/README.md#authentication-and-authorization)); only health
+probes stay anonymous. Plain HTTP Basic and missing production deployment hardening
 mean this project must still run only in a trusted local environment. Do not
 expose it publicly.
 
@@ -565,8 +570,13 @@ progress steps/events, attempt count, lifecycle timestamps, request correlation,
 and sanitized failure summaries. Views refresh every 10 seconds or on demand;
 failed refreshes explicitly retain the last loaded data. Times use the browser's
 local timezone. Eligible environments expose a guarded delete action in detail;
-acceptance is not completed removal. Create and delete require signing in with an
-`OPERATOR` account in the portal; credentials stay in page memory only.
+acceptance is not completed removal. Browsing, create and delete require signing in
+with `OPERATOR` or `DEVELOPER`; credentials stay in page memory only. Developers
+must select a member team; operators may choose an explicit team or leave creation
+unowned for compatibility. `/me` reports `username`, `roles`, and `teams`.
+Trusted SQL administrators provision `platform_teams` and
+`account_team_memberships`, not account-config team fields; see the
+[team provisioning example](docs/api.md#trusted-team-provisioning).
 
 With the worker disabled, the portal honestly shows `REQUESTED` / `PENDING`;
 enable the optional local-kind worker to observe provisioning and readiness.
@@ -581,7 +591,7 @@ startup. `DB_URL` defaults to
 and `DB_PASSWORD` is required with no default.
 See [backend/README.md](backend/README.md#manual-api-checks) for copyable curl
 checks covering creation, normalized replay, conflicts, list/detail reads,
-errors, and restart persistence. Mutations require an `OPERATOR` account
+errors, and restart persistence. The platform-wide examples use an `OPERATOR` account
 (curl prompts with `-u <username>`); no CORS is added. The audit actor is the
 authenticated username, never supplied by caller headers.
 See [infra/README.md](infra/README.md) for the optional kind cluster and
@@ -708,8 +718,8 @@ Any reported performance results will include the test environment and method.
 
 ### Later candidates
 
-- SSO/OIDC, TLS, and ownership- or team-based authorization (basic
-  authenticated mutations exist now).
+- SSO/OIDC and stronger tenant isolation (Basic reads/writes, team authorization,
+  and the separate TLS container portal exist now).
 - Service catalog and ownership.
 - Multiple approved templates.
 - Deployment versions and history.

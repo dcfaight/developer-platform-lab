@@ -33,20 +33,20 @@ public class EnvironmentController {
     public ResponseEntity<AcceptedEnvironmentResponse> create(
             @RequestHeader(value = "Idempotency-Key", required = false) String key,
             @Valid @RequestBody CreateEnvironmentRequest request, Authentication authentication) {
-        var result = service.create(key, request, authentication.getName());
+        var result = service.create(key, request, authentication);
         return ResponseEntity.accepted().location(URI.create("/api/v1/operations/" + result.operationId()))
                 .body(result);
     }
 
     @GetMapping
     public EnvironmentPage list(@RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size) {
-        return service.list(page, size);
+            @RequestParam(defaultValue = "20") int size, Authentication authentication) {
+        return service.list(page, size, authentication);
     }
 
     @GetMapping("/{id}")
-    public EnvironmentResponse get(@PathVariable String id) {
-        return service.get(ApiIds.parse(id));
+    public EnvironmentResponse get(@PathVariable String id, Authentication authentication) {
+        return service.get(ApiIds.parse(id), authentication);
     }
 
     @DeleteMapping("/{id}")
@@ -62,19 +62,20 @@ public class EnvironmentController {
             }
         }
         if (cutoff == null && authentication.getAuthorities().stream()
-                .noneMatch(authority -> "ROLE_OPERATOR".equals(authority.getAuthority()))) {
-            // Defense in depth for the HTTP security rules: only operators may skip the expiry guard.
+                .noneMatch(authority -> java.util.Set.of("ROLE_OPERATOR", "ROLE_DEVELOPER")
+                        .contains(authority.getAuthority()))) {
+            // Defense in depth: automation must never skip the expiry guard.
             throw new ApiException(HttpStatus.FORBIDDEN, "FORBIDDEN",
                     "The authenticated user is not permitted to perform this operation.");
         }
-        var result = service.delete(ApiIds.parse(id), cutoff, authentication.getName());
+        var result = service.delete(ApiIds.parse(id), cutoff, authentication);
         return ResponseEntity.accepted().location(URI.create("/api/v1/operations/" + result.operationId()))
                 .body(result);
     }
 
     @GetMapping("/{id}/operations")
     public OperationPage history(@PathVariable String id, @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size) {
-        return service.history(ApiIds.parse(id), page, size);
+            @RequestParam(defaultValue = "20") int size, Authentication authentication) {
+        return service.history(ApiIds.parse(id), page, size, authentication);
     }
 }

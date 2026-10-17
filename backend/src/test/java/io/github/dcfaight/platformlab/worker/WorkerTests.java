@@ -489,7 +489,7 @@ class WorkerTests {
         expire(id);
         var recovered = repository.claim(properties).orElseThrow();
         assertTrue(repository.fail(recovered, "FAILED", "Creation failed."));
-        var accepted = service.delete(stale.environmentId(), "worker-test");
+        var accepted = service.delete(stale.environmentId(), operator());
         assertEquals("DELETING", accepted.environmentStatus());
         assertFalse(leaseValid.getAsBoolean());
         assertFalse(repository.provisioned(stale));
@@ -525,7 +525,7 @@ class WorkerTests {
         assertEquals("DELETE_FAILED", environmentStatus(id));
         assertEquals(List.of("CLAIMED", "PROGRESS", "RETRY", "CLAIMED", "RETRY", "CLAIMED", "FAILED"), eventTypes(id));
         UUID environmentId = operations.find(id).orElseThrow().environmentId();
-        var retry = service.delete(environmentId, "worker-test");
+        var retry = service.delete(environmentId, operator());
         assertNotEquals(id, retry.operationId());
         doReturn(true).when(provisioner).delete(any(), any(), any());
         worker.poll();
@@ -643,12 +643,17 @@ class WorkerTests {
         worker.poll();
         UUID environmentId = operations.find(createId).orElseThrow().environmentId();
         clearInvocations(provisioner);
-        return service.delete(environmentId, "worker-test").operationId();
+        return service.delete(environmentId, operator()).operationId();
     }
 
     private UUID create() {
         return service.create(UUID.randomUUID().toString(),
-                new CreateEnvironmentRequest("Worker test", "sample-service", 1), "worker-test").operationId();
+                new CreateEnvironmentRequest("Worker test", "sample-service", 1), operator()).operationId();
+    }
+
+    private org.springframework.security.core.Authentication operator() {
+        return new org.springframework.security.authentication.TestingAuthenticationToken(
+                "worker-test", null, "ROLE_OPERATOR");
     }
 
     private void expire(UUID id) {

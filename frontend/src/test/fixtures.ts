@@ -5,6 +5,8 @@ export const demoEnvironment: Environment = {
   name: 'Demo environment',
   namespace: 'env-99f42e18bab940ad83d185bc3f6378c0',
   templateId: 'sample-service',
+  teamId: null,
+  createdBy: null,
   status: 'PROVISIONING',
   createdAt: '2026-10-16T05:00:00Z',
   updatedAt: '2026-10-16T05:01:00Z',
@@ -51,6 +53,6 @@ export function json(value: unknown, status = 200) {
 }
 
 export const operatorSession = {
-  identity: { username: 'alice', roles: ['OPERATOR'] },
+  identity: { username: 'alice', roles: ['OPERATOR'], teams: [] },
   authorization: 'Basic YWxpY2U6dGVzdC1vbmx5LWFsaWNlLXBhc3M=',
 }

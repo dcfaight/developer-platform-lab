@@ -17,8 +17,8 @@ Use a trusted local machine with Bash, Python 3.12, Docker + Compose, kind, kube
 Node.js 24 + npm 11, curl, and jq. Allow image pulls and Maven/npm downloads.
 Reserve ports 5432, 8080, and 5173 (8081 is optional for the sample).
 Commands start from the repository root unless stated otherwise.
-Mutations require HTTP Basic sign-in for locally configured accounts; reads are
-anonymous. Credentials travel unencrypted, so keep every service on loopback and
+All API reads and writes require HTTP Basic sign-in for locally configured accounts;
+only health probes remain anonymous. Credentials travel unencrypted, so keep every service on loopback and
 do not expose them publicly.
 
 1. Follow [backend local setup](../backend/README.md#run-locally) to create/edit
@@ -70,12 +70,16 @@ do not expose them publicly.
 
 1. Open http://127.0.0.1:5173 and sign in with the `OPERATOR` account in the
    panel at the top. The portal checks the credentials with `GET /api/v1/me` and
-   holds them only in page memory; reloading signs you out. Browsing works without
-   signing in, but the create and delete buttons stay disabled. Choose
+   holds them only in page memory; reloading signs you out. Browsing also requires
+   signing in. Choose
    **Create environment**.
 2. Enter a name using ASCII letters, digits, spaces, underscores, or hyphens,
    starting with a letter or digit. Choose a whole-number lifetime from 1 to 24
    hours; it defaults to 8. The only template is the approved `sample-service`.
+   Operators may select a team owner or leave it unowned. A `DEVELOPER` account
+   must select one of its teams and can browse/delete only those teams' environments.
+   A trusted SQL administrator provisions memberships; see
+   [the API provisioning example](api.md#trusted-team-provisioning), not account config.
 3. Submit once. The portal posts through Vite's same-origin `/api` proxy and,
    after `202 Accepted`, opens the environment detail and operation history using
    the returned environment ID.
@@ -100,7 +104,7 @@ Run the following in a **new Bash terminal**; keep it open for the observe step.
 `set -euo pipefail` stops this shell on a failed command rather than continuing
 with missing IDs. curl requests have bounded timeouts and fail on HTTP errors.
 
-curl prompts for the operator password on each mutation (`-u` with only a
+curl prompts for the operator password on each API request (`-u` with only a
 username), so it never appears in shell history or process arguments.
 
 ```bash
@@ -149,7 +153,7 @@ deadline=$((SECONDS + 420))
 status=PENDING
 while (( SECONDS < deadline )); do
   OPERATION=$(curl --fail-with-body --silent --show-error \
-    --connect-timeout 3 --max-time 10 "$API/operations/$OPERATION_ID")
+    --connect-timeout 3 --max-time 10 -u "$OPERATOR_USERNAME" "$API/operations/$OPERATION_ID")
   jq '{status, progressStep, attemptCount, failureCode, failureMessage}' <<< "$OPERATION"
   status=$(jq -er '.status' <<< "$OPERATION")
   case "$status" in
@@ -164,7 +168,7 @@ if [[ "$status" != SUCCEEDED ]]; then
 fi
 
 ENVIRONMENT=$(curl --fail-with-body --silent --show-error \
-  --connect-timeout 3 --max-time 10 "$API/environments/$ENVIRONMENT_ID")
+  --connect-timeout 3 --max-time 10 -u "$OPERATOR_USERNAME" "$API/environments/$ENVIRONMENT_ID")
 jq '{name, status, namespace, expiresAt}' <<< "$ENVIRONMENT"
 NAMESPACE=$(jq -er '.namespace' <<< "$ENVIRONMENT")
 kubectl --context kind-developer-platform-lab -n "$NAMESPACE" get deployments,pods
@@ -207,7 +211,7 @@ deadline=$((SECONDS + 420))
 status=PENDING
 while (( SECONDS < deadline )); do
   OPERATION=$(curl --fail-with-body --silent --show-error \
-    --connect-timeout 3 --max-time 10 "$API/operations/$DELETE_OPERATION_ID")
+    --connect-timeout 3 --max-time 10 -u "$OPERATOR_USERNAME" "$API/operations/$DELETE_OPERATION_ID")
   jq '{status, progressStep, attemptCount, failureCode, failureMessage}' <<< "$OPERATION"
   status=$(jq -er '.status' <<< "$OPERATION")
   case "$status" in
@@ -218,7 +222,7 @@ while (( SECONDS < deadline )); do
 done
 [[ "$status" == SUCCEEDED ]] || { echo 'Deletion still incomplete; inspect history.' >&2; exit 1; }
 curl --fail-with-body --silent --show-error --connect-timeout 3 --max-time 10 \
-  "$API/environments/$ENVIRONMENT_ID" | jq '{status, latestOperation}'
+  -u "$OPERATOR_USERNAME" "$API/environments/$ENVIRONMENT_ID" | jq '{status, latestOperation}'
 # Success prints nothing; connection/permission errors must not be mistaken for absence.
 REMAINING=$(kubectl --context kind-developer-platform-lab get namespace \
   "$NAMESPACE" --ignore-not-found -o name)
@@ -246,8 +250,10 @@ not a way to shorten application TTL. Keep the worker and dedicated kind cluster
 running. Use a disposable trusted-local inventory: execution selects **all**
 expired `READY`/`FAILED` records, not just the example. Review the dry-run IDs.
 There is no scheduler or public/shared deployment support. Creating needs the
-`OPERATOR` account; `--execute` needs the `CLEANUP` account in
-`PLATFORM_CLEANUP_USERNAME`/`PLATFORM_CLEANUP_PASSWORD` (dry-run needs none).
+`OPERATOR` account; both CLI modes need the exclusive `CLEANUP` account in
+`PLATFORM_CLEANUP_USERNAME`/`PLATFORM_CLEANUP_PASSWORD`. CLEANUP has list/detail
+discovery of all environments and guarded deletion but cannot read operation history/direct operations;
+observation below therefore uses the operator credentials.
 
 In a new Bash terminal at the repository root:
 
@@ -267,7 +273,7 @@ deadline=$((SECONDS + 420))
 status=PENDING
 while (( SECONDS < deadline )); do
   OPERATION=$(curl --fail-with-body --silent --show-error \
-    --connect-timeout 3 --max-time 10 "$API/operations/$CREATE_OPERATION_ID")
+    --connect-timeout 3 --max-time 10 -u "$OPERATOR_USERNAME" "$API/operations/$CREATE_OPERATION_ID")
   status=$(jq -er '.status' <<< "$OPERATION")
   case "$status" in
     SUCCEEDED) break ;;
@@ -277,7 +283,7 @@ while (( SECONDS < deadline )); do
 done
 [[ "$status" == SUCCEEDED ]] || { echo 'Creation incomplete; inspect history.' >&2; exit 1; }
 ENVIRONMENT=$(curl --fail-with-body --silent --show-error \
-  --connect-timeout 3 --max-time 10 "$API/environments/$ENVIRONMENT_ID")
+  --connect-timeout 3 --max-time 10 -u "$OPERATOR_USERNAME" "$API/environments/$ENVIRONMENT_ID")
 EXPIRES_AT=$(jq -er '.expiresAt' <<< "$ENVIRONMENT")
 NAMESPACE=$(jq -er '.namespace' <<< "$ENVIRONMENT")
 printf 'Wait for the real expiry: %s (up to one hour)\n' "$EXPIRES_AT"
@@ -288,6 +294,9 @@ seconds = max(0, math.ceil((expiry - datetime.datetime.now(datetime.timezone.utc
 if seconds > 3660: raise SystemExit("Unexpected expiry; inspect rather than extending the wait")
 time.sleep(seconds)' "$EXPIRES_AT"
 
+export PLATFORM_CLEANUP_USERNAME=cleanup-bot   # your configured CLEANUP-only account
+read -r -s -p 'Cleanup password: ' PLATFORM_CLEANUP_PASSWORD; echo
+export PLATFORM_CLEANUP_PASSWORD
 python3 automation/cleanup_expired.py --api-base-url "$API" --dry-run --json
 # STOP and review selectedIds before the next command. This is a fresh scan.
 ```
@@ -295,9 +304,6 @@ python3 automation/cleanup_expired.py --api-base-url "$API" --dry-run --json
 TTL passing alone has made no cleanup request. After reviewing the inventory:
 
 ```bash
-export PLATFORM_CLEANUP_USERNAME=cleanup-bot   # your configured CLEANUP account
-read -r -s -p 'Cleanup password: ' PLATFORM_CLEANUP_PASSWORD; echo
-export PLATFORM_CLEANUP_PASSWORD
 if SUMMARY=$(python3 automation/cleanup_expired.py --api-base-url "$API" --execute --json); then
   :
 else
@@ -305,7 +311,6 @@ else
   echo 'Cleanup incomplete; inspect summary/history before rerunning.' >&2
   exit 1
 fi
-unset PLATFORM_CLEANUP_PASSWORD
 jq . <<< "$SUMMARY"
 DELETE_OPERATION_ID=$(jq -er --arg id "$ENVIRONMENT_ID" \
   '.acceptedOperations[] | select(.environmentId == $id) | .operationId' <<< "$SUMMARY")
@@ -314,7 +319,7 @@ deadline=$((SECONDS + 420))
 status=PENDING
 while (( SECONDS < deadline )); do
   OPERATION=$(curl --fail-with-body --silent --show-error \
-    --connect-timeout 3 --max-time 10 "$API/operations/$DELETE_OPERATION_ID")
+    --connect-timeout 3 --max-time 10 -u "$OPERATOR_USERNAME" "$API/operations/$DELETE_OPERATION_ID")
   jq '{status, progressStep, failureCode, failureMessage}' <<< "$OPERATION"
   status=$(jq -er '.status' <<< "$OPERATION")
   case "$status" in
@@ -325,20 +330,21 @@ while (( SECONDS < deadline )); do
 done
 [[ "$status" == SUCCEEDED ]] || { echo 'Deletion incomplete; inspect history.' >&2; exit 1; }
 ENVIRONMENT=$(curl --fail-with-body --silent --show-error \
-  --connect-timeout 3 --max-time 10 "$API/environments/$ENVIRONMENT_ID")
+  --connect-timeout 3 --max-time 10 -u "$OPERATOR_USERNAME" "$API/environments/$ENVIRONMENT_ID")
 jq -e '.status == "DELETED"' <<< "$ENVIRONMENT"
 REMAINING=$(kubectl --context kind-developer-platform-lab get namespace \
   "$NAMESPACE" --ignore-not-found -o name)
 [[ -z "$REMAINING" ]] || { echo 'Namespace remains; inspect it.' >&2; exit 1; }
 python3 automation/cleanup_expired.py --api-base-url "$API" --dry-run --json
+unset PLATFORM_CLEANUP_PASSWORD
 ```
 
 The last run skips the retained `DELETED` record; DB operations and audit history
 remain available. A terminal `DELETE_FAILED` is skipped on every cleanup run.
 Investigate before deliberately retrying through the portal/manual API. If a CLI
-response is ambiguous, inspect detail/history first, not repeated DELETEs.
+response is ambiguous, inspect detail/history as an operator first, not repeated DELETEs.
 Exit 1 means errors/incomplete work (including limits); exit 2 means invalid
-arguments. See [full policy, counters and recovery runbook](../automation/README.md).
+arguments or credentials. See [full policy, counters and recovery runbook](../automation/README.md).
 
 For fast repeatable verification, behavioral tests inject a clock and backend
 tests seed controlled expired fixtures. Those are test-only mechanisms, not
@@ -352,7 +358,7 @@ historical deletion evidence below is not a new expiration end-to-end pass.
 
 | Symptom | Check / expected behavior |
 |---|---|
-| Portal cannot load or gets a proxy error | Confirm PostgreSQL and Spring Boot started, then `curl --fail http://127.0.0.1:8080/api/v1/environments`. Use the Vite dev server, not preview alone. |
+| Portal cannot load or gets a proxy error | Confirm PostgreSQL and Spring Boot started, then `curl --fail -u "$OPERATOR_USERNAME" http://127.0.0.1:8080/api/v1/environments`. Use the Vite dev server, not preview alone. |
 | Database login fails | Compose reads `.env`; Spring Boot does not. Re-export `DB_*`. An existing database volume retains its original password. |
 | Operation stays `PENDING` with zero attempts | Restart the backend with `WORKER_ENABLED=true` and the same database exports. API-only acceptance still works with the worker off. |
 | Kubernetes configuration or ownership failure | Inspect sanitized failure fields and backend logs locally. Verify the trusted kubeconfig contains `kind-developer-platform-lab` and a loopback HTTPS endpoint; do not bypass safety checks. |

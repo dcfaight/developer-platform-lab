@@ -41,7 +41,10 @@ public record PlatformSecurityProperties(List<User> users) {
                         + PBKDF2 + "} hash; plaintext and {noop} values are not accepted.");
             }
             if (user.roles().isEmpty()) {
-                throw new IllegalStateException(prefix + ".roles must contain OPERATOR and/or CLEANUP.");
+                throw new IllegalStateException(prefix + ".roles must contain OPERATOR, DEVELOPER or CLEANUP.");
+            }
+            if (user.roles().contains(Role.CLEANUP) && user.roles().size() != 1) {
+                throw new IllegalStateException(prefix + ".roles must not combine CLEANUP with other roles.");
             }
         }
     }
@@ -60,6 +63,8 @@ public record PlatformSecurityProperties(List<User> users) {
     public enum Role {
         /** May create environments and request manual or expiry-guarded deletion. */
         OPERATOR,
+        /** May manage environments owned by the account's trusted teams. */
+        DEVELOPER,
         /** May only request expiry-guarded deletion ({@code DELETE ...?expiredBefore=}). */
         CLEANUP
     }

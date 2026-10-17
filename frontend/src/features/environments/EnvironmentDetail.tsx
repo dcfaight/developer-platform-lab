@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { environment, operationPage } from '../../api/client'
 import type { Operation } from '../../api/client'
 import { useResource } from '../../api/useResource'
+import { useSession } from '../../api/session'
 import { Pagination } from '../../components/Pagination'
 import { OperationFailure } from '../../components/OperationFailure'
 import { ResourceState } from '../../components/ResourceState'
@@ -73,6 +74,8 @@ function OperationHistory({ id }: { id: string }) {
 }
 
 export function EnvironmentDetail({ id }: { id: string }) {
+  const session = useSession()
+  const cleanupOnly = session?.identity.roles.includes('CLEANUP')
   const [historyRevision, setHistoryRevision] = useState(0)
   const resource = useResource(`/environments/${encodeURIComponent(id)}`, environment)
   const item = resource.data
@@ -88,6 +91,8 @@ export function EnvironmentDetail({ id }: { id: string }) {
         <dl className="metadata">
           <div className="wide"><dt>Environment ID</dt><dd><code>{item.id}</code></dd></div>
           <div><dt>Template</dt><dd>{item.templateId}</dd></div>
+          <div><dt>Team</dt><dd>{item.teamId ?? 'Operator-managed (no team)'}</dd></div>
+          <div><dt>Created by</dt><dd>{item.createdBy ?? 'Not recorded'}</dd></div>
           <div><dt>Namespace</dt><dd><code>{item.namespace}</code></dd></div>
           <div><dt>Created</dt><dd><Timestamp value={item.createdAt} /></dd></div>
           <div><dt>Updated</dt><dd><Timestamp value={item.updatedAt} /></dd></div>
@@ -105,6 +110,8 @@ export function EnvironmentDetail({ id }: { id: string }) {
           }} />
       </>}
     </section>
-    {item && <OperationHistory key={`${id}-${historyRevision}`} id={id} />}
+    {item && (cleanupOnly
+      ? <p className="notice">CLEANUP portal access is read-only discovery. Operation history is unavailable for this account.</p>
+      : <OperationHistory key={`${id}-${historyRevision}`} id={id} />)}
   </>
 }

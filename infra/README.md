@@ -176,7 +176,8 @@ trusted-loopback HTTP only and is not extended to this TLS endpoint in this slic
    docker compose -f compose.deploy.yaml build --pull
    docker compose -f compose.deploy.yaml up -d --wait --wait-timeout 180
    curl --fail --cacert "$TLS_CERT_FILE" https://localhost:8443/
-   curl --fail --cacert "$TLS_CERT_FILE" https://localhost:8443/api/v1/environments
+   curl --fail --cacert "$TLS_CERT_FILE" -u "$DEPLOY_OPERATOR_USERNAME" \
+     https://localhost:8443/api/v1/environments
    ```
 
    Open `https://localhost:8443` in a browser that trusts the configured certificate.
@@ -184,7 +185,8 @@ trusted-loopback HTTP only and is not extended to this TLS endpoint in this slic
    The frontend publishes only `127.0.0.1:${HTTPS_PORT}:8443`; adjust the example
    URL if changing the port. Do not bypass TLS verification or transmit Basic
    credentials to an HTTP URL. Public/interface binding is intentionally not
-   provided; TLS alone does not make anonymous reads safe for internet exposure.
+   provided; Basic-authenticated, team-scoped API access plus TLS does not establish
+   safe public exposure. Health probes remain anonymous and private.
 
 ### Runtime and operations
 
@@ -227,11 +229,17 @@ trusted-loopback HTTP only and is not extended to this TLS endpoint in this slic
   build network and registries; never disable package-download TLS verification.
   Back up and restore-test PostgreSQL before upgrades; Flyway migrations may
   prevent simple image rollback. Take a backup before applying new migrations.
+  **V7 requires a coordinated backend stop/start, not a mixed-version rolling
+  migration:** stop every old backend process before starting the upgraded
+  backend/Flyway. The idempotency primary key changes from `key` to `(scope, key)`,
+  so old `ON CONFLICT (key)` statements no longer work after migration. Existing
+  rows and audit history are retained. Apply this rule to host-run, Compose and
+  Kubernetes deployments; do not run old and upgraded backend versions together.
 - Replace certificates before expiry and restart/recreate nginx to load them.
   HSTS lasts one year; use disposable localhost certificates only for testing.
   Rotate password hashes by recreating the backend. There is no certificate
-  renewal, SSO, external secrets, rate limiting, read authorization, per-owner
-  RBAC, multi-tenant isolation, database transport TLS, or worker service-account
+  renewal, SSO, external secrets, rate limiting, strong multi-tenant isolation,
+  database transport TLS, or worker service-account
   design in Compose. The separate K3s packaging below uses an explicit in-cluster
   worker identity; this does not enable provisioning in the Compose deployment.
 - Stop with `docker compose -f compose.deploy.yaml down`; this retains the
@@ -414,17 +422,22 @@ DNS/hosts, or use curl's explicit override:
 
 ```sh
 export K3S_NODE_IP=192.0.2.10 # Replace with your node's reachable address.
+read -r -p 'Configured operator username: ' OPERATOR_USERNAME
 curl --fail --cacert "$TLS_DIR/tls.crt" \
   --resolve "platform.localhost:443:$K3S_NODE_IP" https://platform.localhost/
 curl --fail --cacert "$TLS_DIR/tls.crt" \
-  --resolve "platform.localhost:443:$K3S_NODE_IP" https://platform.localhost/api/v1/environments
+  --resolve "platform.localhost:443:$K3S_NODE_IP" -u "$OPERATOR_USERNAME" \
+  https://platform.localhost/api/v1/environments
 ```
 
 The ingress is HTTPS-only on Traefik's `websecure` entrypoint, not an HTTP redirect.
 It terminates TLS and forwards to nginx's cluster-internal HTTP listener; nginx
 proxies only `/api/v1/` to the backend, not `/actuator`. Cluster-internal traffic is
 not encrypted or isolated in this pass. Restrict node/firewall access to trusted
-local clients: reads remain anonymous, and this is not safe public exposure.
+local clients: API reads require Basic credentials, but this is not safe public
+exposure. Developers are scoped to persisted team memberships; operators remain
+platform-wide. Health probes stay anonymous. No RBAC or ingress changes are
+needed for this application authorization policy.
 
 Without ingress, keep this running in another terminal:
 
@@ -522,7 +535,7 @@ ENV_NAMESPACE="env-${ENV_ID//-/}"
 
 # Repeat until SUCCEEDED / READY; inspect CLAIMED, PROVISIONED and readiness events.
 curl --silent --show-error --fail --cacert "$TLS_DIR/tls.crt" \
-  --resolve "$K3S_HOST:443:$K3S_NODE_IP" \
+  --resolve "$K3S_HOST:443:$K3S_NODE_IP" -u "$OPERATOR_USERNAME" \
   "https://$K3S_HOST/api/v1/operations/$CREATE_OPERATION_ID" | python3 -m json.tool
 kubectl --context "$K3S_CONTEXT" get namespace "$ENV_NAMESPACE"
 kubectl --context "$K3S_CONTEXT" -n "$ENV_NAMESPACE" get deployments,pods
@@ -534,10 +547,10 @@ curl --silent --show-error --fail --cacert "$TLS_DIR/tls.crt" \
 read -r -p 'Delete operationId from response: ' DELETE_OPERATION_ID
 # Repeat both GETs until SUCCEEDED / DELETED and environment status DELETED.
 curl --silent --show-error --fail --cacert "$TLS_DIR/tls.crt" \
-  --resolve "$K3S_HOST:443:$K3S_NODE_IP" \
+  --resolve "$K3S_HOST:443:$K3S_NODE_IP" -u "$OPERATOR_USERNAME" \
   "https://$K3S_HOST/api/v1/operations/$DELETE_OPERATION_ID" | python3 -m json.tool
 curl --silent --show-error --fail --cacert "$TLS_DIR/tls.crt" \
-  --resolve "$K3S_HOST:443:$K3S_NODE_IP" \
+  --resolve "$K3S_HOST:443:$K3S_NODE_IP" -u "$OPERATOR_USERNAME" \
   "https://$K3S_HOST/api/v1/environments/$ENV_ID" | python3 -m json.tool
 kubectl --context "$K3S_CONTEXT" get namespace "$ENV_NAMESPACE"
 # Expected final result: NotFound (nonzero exit), not a connectivity/auth error.

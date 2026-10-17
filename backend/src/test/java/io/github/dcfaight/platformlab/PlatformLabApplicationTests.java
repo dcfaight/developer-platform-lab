@@ -77,6 +77,8 @@ class PlatformLabApplicationTests {
         jdbc.update("DELETE FROM idempotency_requests");
         jdbc.update("DELETE FROM operations");
         jdbc.update("DELETE FROM environments");
+        jdbc.update("DELETE FROM account_team_memberships");
+        jdbc.update("DELETE FROM platform_teams");
     }
 
     @Test
@@ -119,7 +121,7 @@ class PlatformLabApplicationTests {
         ApiResponse environment = get("/api/v1/environments/" + environmentId);
         assertEquals(200, environment.status());
         assertFields(environment.json(), "id", "name", "namespace", "templateId", "status",
-                "expiresAt", "createdAt", "updatedAt", "latestOperation");
+                "expiresAt", "createdAt", "updatedAt", "latestOperation", "teamId", "createdBy");
         assertFields(environment.json().path("latestOperation"), "id", "type", "status", "progressStep",
                 "failureCode", "failureMessage");
         assertTrue(environment.json().path("latestOperation").path("failureCode").isNull());
@@ -354,7 +356,7 @@ class PlatformLabApplicationTests {
             assertEquals(page == 2 ? 1 : 2, response.json().path("items").size());
             for (JsonNode item : response.json().path("items")) {
                 assertFields(item, "id", "name", "namespace", "templateId", "status",
-                        "expiresAt", "createdAt", "updatedAt", "latestOperation");
+                        "expiresAt", "createdAt", "updatedAt", "latestOperation", "teamId", "createdBy");
                 actual.add(item.path("id").asText());
             }
         }
@@ -437,7 +439,7 @@ class PlatformLabApplicationTests {
             assertEquals(original.json(), replay.json());
             assertEquals(original.header("Location"), replay.header("Location"));
             assertEquals(200, request(restartedPort, "GET",
-                    original.header("Location"), null, Map.of()).status());
+                    original.header("Location"), null, Map.of("Authorization", TestUsers.basic(TestUsers.OPERATOR))).status());
         }
         assertCounts(1);
     }
@@ -579,7 +581,7 @@ class PlatformLabApplicationTests {
     }
 
     @Test
-    void guardedDeleteReusesActiveDeletionWithoutRecheckingExpiry() throws Exception {
+    void guardedDeleteRechecksExpiryEvenForActiveDeletion() throws Exception {
         UUID id = seedEnvironment("READY", Instant.now().plusSeconds(3600));
         var manual = delete(id.toString());
         assertEquals(202, manual.status(), manual.body());
@@ -587,9 +589,7 @@ class PlatformLabApplicationTests {
         for (String operationStatus : List.of("PENDING", "RUNNING")) {
             jdbc.update("UPDATE operations SET status = ? WHERE id = ?", operationStatus, operationId);
             var reused = guardedDelete(id, Instant.now().minusSeconds(60).toString());
-            assertEquals(202, reused.status(), reused.body());
-            assertEquals(operationId.toString(), uuid(reused.json(), "operationId"));
-            assertEquals(operationStatus, reused.json().path("operationStatus").asText());
+            assertStateConflict(reused);
         }
         assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
         assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
@@ -749,12 +749,8 @@ class PlatformLabApplicationTests {
             command.add("--execute");
         }
         var builder = new ProcessBuilder(command).redirectErrorStream(true);
-        builder.environment().remove("PLATFORM_CLEANUP_USERNAME");
-        builder.environment().remove("PLATFORM_CLEANUP_PASSWORD");
-        if (execute) {
-            builder.environment().put("PLATFORM_CLEANUP_USERNAME", TestUsers.CLEANUP);
-            builder.environment().put("PLATFORM_CLEANUP_PASSWORD", TestUsers.password(TestUsers.CLEANUP));
-        }
+        builder.environment().put("PLATFORM_CLEANUP_USERNAME", TestUsers.CLEANUP);
+        builder.environment().put("PLATFORM_CLEANUP_PASSWORD", TestUsers.password(TestUsers.CLEANUP));
         Process process = builder.start();
         try {
             assertTrue(process.waitFor(30, TimeUnit.SECONDS), "Python cleanup timed out");
@@ -838,12 +834,16 @@ class PlatformLabApplicationTests {
     }
 
     @Test
-    void readsRemainAvailableWithoutCredentials() throws Exception {
+    void allReadsRequireCredentialsExceptHealthProbes() throws Exception {
         UUID id = seedEnvironment("READY", Instant.now().plusSeconds(3600));
-        assertEquals(200, get("/api/v1/environments").status());
-        assertEquals(200, get("/api/v1/environments/" + id).status());
-        assertEquals(200, get("/api/v1/environments/" + id + "/operations").status());
-        assertError(get("/api/v1/operations/" + UUID.randomUUID()), 404);
+        for (String path : List.of("/api/v1/environments", "/api/v1/environments/" + id,
+                "/api/v1/environments/" + id + "/operations", "/api/v1/operations/" + UUID.randomUUID(),
+                "/api/v1/operations/metrics", "/api/v1/me")) {
+            assertUnauthenticated(request(port, "GET", path, null, Map.of()));
+            assertEquals(401, request(port, "HEAD", path, null, Map.of()).status());
+        }
+        assertEquals(200, request(port, "GET", "/actuator/health/liveness", null, Map.of()).status());
+        assertEquals(200, request(port, "GET", "/actuator/health/readiness", null, Map.of()).status());
     }
 
     @Test
@@ -852,7 +852,7 @@ class PlatformLabApplicationTests {
             var me = request(port, "GET", "/api/v1/me", null,
                     Map.of("Authorization", TestUsers.basic(expected.getKey())));
             assertEquals(200, me.status(), me.body());
-            assertFields(me.json(), "username", "roles");
+            assertFields(me.json(), "username", "roles", "teams");
             assertEquals(expected.getKey(), me.json().path("username").asText());
             assertEquals(1, me.json().path("roles").size());
             assertEquals(expected.getValue(), me.json().path("roles").get(0).asText());
@@ -889,18 +889,288 @@ class PlatformLabApplicationTests {
         var created = post("audit-identity", payload("Audit identity", 8));
         assertEquals(202, created.status(), created.body());
         UUID id = UUID.fromString(uuid(created.json(), "environmentId"));
-        // An idempotent replay by another operator returns the original acceptance and adds no audit event.
+        // Another account owns an independent reservation even with the same key and payload.
         var replay = request(port, "POST", "/api/v1/environments", payload("Audit identity", 8),
                 Map.of("Idempotency-Key", "audit-identity", "Authorization", TestUsers.basic(TestUsers.SECOND_OPERATOR)));
         assertEquals(202, replay.status(), replay.body());
-        assertEquals(created.json(), replay.json());
+        assertNotEquals(created.json().path("environmentId"), replay.json().path("environmentId"));
         finishCreation(id, "READY");
         var deleted = request(port, "DELETE", "/api/v1/environments/" + id, null,
                 Map.of("Authorization", TestUsers.basic(TestUsers.SECOND_OPERATOR)));
         assertEquals(202, deleted.status(), deleted.body());
         assertEquals(List.of("ENVIRONMENT_REQUESTED:" + TestUsers.OPERATOR,
+                "ENVIRONMENT_REQUESTED:" + TestUsers.SECOND_OPERATOR,
                 "ENVIRONMENT_DELETE_REQUESTED:" + TestUsers.SECOND_OPERATOR), jdbc.queryForList(
                 "SELECT action || ':' || actor FROM audit_events ORDER BY created_at, action DESC", String.class));
+    }
+
+    @Test
+    void developerCreationRequiresTrustedMembershipBeforeAnyReservation() throws Exception {
+        seedTeams();
+        for (String body : List.of(payload("Denied", 1),
+                teamPayload("Denied", "team-b"), teamPayload("Denied", "unknown-team"))) {
+            assertForbidden(postAs(TestUsers.DEVELOPER, "denied-key", body));
+            assertCounts(0);
+        }
+        var spoofed = request(port, "POST", "/api/v1/environments", teamPayload("Denied", "team-b"),
+                Map.of("Authorization", TestUsers.basic(TestUsers.DEVELOPER), "Idempotency-Key", "spoofed",
+                       "X-Team-Id", "team-b", "X-Actor", TestUsers.OTHER_DEVELOPER));
+        assertForbidden(spoofed);
+        assertCounts(0);
+        assertForbidden(postAs(TestUsers.OPERATOR, "unknown", teamPayload("Denied", "unknown-team")));
+        assertCounts(0);
+        var accepted = postAs(TestUsers.DEVELOPER, "denied-key", teamPayload("Allowed", "team-a"));
+        assertEquals(202, accepted.status(), accepted.body());
+        var row = jdbc.queryForMap("SELECT team_id, created_by FROM environments");
+        assertEquals("team-a", row.get("team_id"));
+        assertEquals(TestUsers.DEVELOPER, row.get("created_by"));
+        assertEquals(TestUsers.DEVELOPER, jdbc.queryForObject("SELECT actor FROM audit_events", String.class));
+        assertEquals(TestUsers.DEVELOPER + ":team-a",
+                jdbc.queryForObject("SELECT scope FROM idempotency_requests", String.class));
+        assertCounts(1);
+    }
+
+    @Test
+    void operatorCanCreateForATeamWithoutMembership() throws Exception {
+        seedTeams();
+        assertTrue(getAs(TestUsers.OPERATOR, "/api/v1/me").json().path("teams").isEmpty());
+        var created = postAs(TestUsers.OPERATOR, "operator-team", teamPayload("Managed", "team-b"));
+        assertEquals(202, created.status(), created.body());
+        var detail = get("/api/v1/environments/" + uuid(created.json(), "environmentId"));
+        assertEquals("team-b", detail.json().path("teamId").asText());
+        assertEquals(TestUsers.OPERATOR, detail.json().path("createdBy").asText());
+        assertEquals(200, getAs(TestUsers.OTHER_DEVELOPER,
+                "/api/v1/operations/" + uuid(created.json(), "operationId")).status());
+        assertCounts(1);
+    }
+
+    @Test
+    void identityTeamsComeOnlyFromCurrentDatabaseMemberships() throws Exception {
+        seedTeams();
+        jdbc.update("INSERT INTO account_team_memberships VALUES (?, 'team-b')", TestUsers.DEVELOPER);
+        var identity = request(port, "GET", "/api/v1/me?teamId=untrusted", null,
+                Map.of("Authorization", TestUsers.basic(TestUsers.DEVELOPER),
+                       "X-Team-Id", "untrusted", "X-Forwarded-User", TestUsers.OPERATOR));
+        assertEquals(200, identity.status(), identity.body());
+        assertFields(identity.json(), "username", "roles", "teams");
+        assertEquals(TestUsers.DEVELOPER, identity.json().path("username").asText());
+        assertEquals(mapper.readTree("[\"DEVELOPER\"]"), identity.json().path("roles"));
+        assertEquals(mapper.readTree("[\"team-a\",\"team-b\"]"), identity.json().path("teams"));
+        jdbc.update("DELETE FROM account_team_memberships WHERE username = ?", TestUsers.DEVELOPER);
+        assertTrue(getAs(TestUsers.DEVELOPER, "/api/v1/me").json().path("teams").isEmpty());
+        assertTrue(getAs(TestUsers.OPERATOR, "/api/v1/me").json().path("teams").isEmpty());
+        assertCounts(0);
+    }
+
+    @Test
+    void teamReadsHistoryOperationsAndPaginationNeverLeakOtherTeamsOrLegacyRows() throws Exception {
+        seedTeams();
+        var first = postAs(TestUsers.DEVELOPER, "a-first", teamPayload("A first", "team-a"));
+        var second = postAs(TestUsers.TEAMMATE, "a-second", teamPayload("A second", "team-a"));
+        var other = postAs(TestUsers.OTHER_DEVELOPER, "b-first", teamPayload("B first", "team-b"));
+        var legacy = post("unowned", payload("Operator managed", 1));
+        for (var created : List.of(first, second, other, legacy)) {
+            assertEquals(202, created.status(), created.body());
+        }
+        Set<String> expected = Set.of(uuid(first.json(), "environmentId"), uuid(second.json(), "environmentId"));
+        Set<String> seen = new HashSet<>();
+        for (int page = 0; page < 2; page++) {
+            var listing = getAs(TestUsers.DEVELOPER, "/api/v1/environments?page=" + page + "&size=1");
+            assertEquals(200, listing.status(), listing.body());
+            assertEquals(2, listing.json().path("totalElements").asInt());
+            assertEquals(2, listing.json().path("totalPages").asInt());
+            assertEquals(1, listing.json().path("items").size());
+            var item = listing.json().path("items").get(0);
+            assertEquals("team-a", item.path("teamId").asText());
+            seen.add(item.path("id").asText());
+        }
+        assertEquals(expected, seen);
+        assertTrue(getAs(TestUsers.DEVELOPER, "/api/v1/environments?page=2&size=1")
+                .json().path("items").isEmpty());
+        for (String user : List.of(TestUsers.DEVELOPER, TestUsers.TEAMMATE)) {
+            String id = uuid(first.json(), "environmentId");
+            assertEquals(200, getAs(user, "/api/v1/environments/" + id).status());
+            var history = getAs(user, "/api/v1/environments/" + id + "/operations");
+            assertEquals(200, history.status(), history.body());
+            assertEquals(1, history.json().path("totalElements").asInt());
+            assertEquals(uuid(first.json(), "operationId"), history.json().path("items").get(0).path("id").asText());
+            assertEquals(200, getAs(user, "/api/v1/operations/" + uuid(first.json(), "operationId")).status());
+            for (var forbidden : List.of(other, legacy)) {
+                String hiddenId = uuid(forbidden.json(), "environmentId");
+                assertForbidden(getAs(user, "/api/v1/environments/" + hiddenId));
+                assertForbidden(getAs(user, "/api/v1/environments/" + hiddenId + "/operations"));
+                assertForbidden(getAs(user, "/api/v1/operations/" + uuid(forbidden.json(), "operationId")));
+                assertForbidden(deleteAs(user, hiddenId, ""));
+                assertForbidden(deleteAs(user, hiddenId, "?expiredBefore="
+                       + URLEncoder.encode(Instant.now().minusSeconds(60).toString(), StandardCharsets.UTF_8)));
+            }
+            assertForbidden(getAs(user, "/api/v1/operations/metrics"));
+        }
+        assertCounts(4);
+        for (String user : List.of(TestUsers.OPERATOR, TestUsers.CLEANUP)) {
+            var listing = getAs(user, "/api/v1/environments?size=1");
+            assertEquals(4, listing.json().path("totalElements").asInt());
+            assertEquals(4, listing.json().path("totalPages").asInt());
+        }
+        for (var created : List.of(first, other, legacy)) {
+            String id = uuid(created.json(), "environmentId");
+            assertEquals(200, get("/api/v1/environments/" + id).status());
+            assertEquals(200, get("/api/v1/environments/" + id + "/operations").status());
+            assertEquals(200, get("/api/v1/operations/" + uuid(created.json(), "operationId")).status());
+        }
+        assertEquals(200, get("/api/v1/operations/metrics").status());
+        jdbc.update("INSERT INTO account_team_memberships VALUES (?, 'team-b')", TestUsers.DEVELOPER);
+        assertEquals(3, getAs(TestUsers.DEVELOPER, "/api/v1/environments").json().path("totalElements").asInt());
+        jdbc.update("DELETE FROM account_team_memberships WHERE username = ?", TestUsers.DEVELOPER);
+        var empty = getAs(TestUsers.DEVELOPER, "/api/v1/environments");
+        assertEquals(0, empty.json().path("totalElements").asInt());
+        assertEquals(0, empty.json().path("totalPages").asInt());
+        assertTrue(empty.json().path("items").isEmpty());
+    }
+
+    @Test
+    void teammateMayDeleteAndHistoryRemainsTeamReadable() throws Exception {
+        seedTeams();
+        var created = postAs(TestUsers.DEVELOPER, "shared-delete", teamPayload("Shared", "team-a"));
+        UUID id = UUID.fromString(uuid(created.json(), "environmentId"));
+        finishCreation(id, "READY");
+        var deleted = deleteAs(TestUsers.TEAMMATE, id.toString(), "");
+        assertEquals(202, deleted.status(), deleted.body());
+        var replay = deleteAs(TestUsers.DEVELOPER, id.toString(), "");
+        assertEquals(deleted.json(), replay.json());
+        assertEquals(2, getAs(TestUsers.TEAMMATE, "/api/v1/environments/" + id + "/operations")
+                .json().path("totalElements").asInt());
+        assertEquals(200, getAs(TestUsers.TEAMMATE,
+                "/api/v1/operations/" + uuid(deleted.json(), "operationId")).status());
+        assertEquals(TestUsers.TEAMMATE, jdbc.queryForObject(
+                "SELECT actor FROM audit_events WHERE action = 'ENVIRONMENT_DELETE_REQUESTED'", String.class));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+    }
+
+    @Test
+    void scopedReplayIsIsolatedByAccountAndTeamAndRevocationDeniesBeforeWrites() throws Exception {
+        seedTeams();
+        jdbc.update("INSERT INTO account_team_memberships VALUES (?, 'team-b')", TestUsers.DEVELOPER);
+        var first = postAs(TestUsers.DEVELOPER, "shared-key", teamPayload("Shared", "team-a"));
+        var anotherTeam = postAs(TestUsers.DEVELOPER, "shared-key", teamPayload("Shared", "team-b"));
+        var anotherAccount = postAs(TestUsers.TEAMMATE, "shared-key", teamPayload("Shared", "team-a"));
+        Set<String> ids = new HashSet<>();
+        for (var response : List.of(first, anotherTeam, anotherAccount)) {
+            assertEquals(202, response.status(), response.body());
+            ids.add(uuid(response.json(), "environmentId"));
+        }
+        assertEquals(3, ids.size());
+        assertEquals(first.json(), postAs(TestUsers.DEVELOPER, "shared-key", teamPayload("Shared", "team-a")).json());
+        assertEquals(anotherTeam.json(), postAs(TestUsers.DEVELOPER, "shared-key", teamPayload("Shared", "team-b")).json());
+        assertError(postAs(TestUsers.DEVELOPER, "shared-key", teamPayload("Changed", "team-a")), 409);
+        assertCounts(3);
+        assertEquals(Set.of(TestUsers.DEVELOPER + ":team-a", TestUsers.DEVELOPER + ":team-b",
+                TestUsers.TEAMMATE + ":team-a"), new HashSet<>(jdbc.queryForList(
+                       "SELECT scope FROM idempotency_requests", String.class)));
+        UUID id = UUID.fromString(uuid(first.json(), "environmentId"));
+        finishCreation(id, "READY");
+        jdbc.update("DELETE FROM account_team_memberships WHERE username = ? AND team_id = 'team-a'",
+                TestUsers.DEVELOPER);
+        assertForbidden(postAs(TestUsers.DEVELOPER, "shared-key", teamPayload("Shared", "team-a")));
+        assertForbidden(postAs(TestUsers.DEVELOPER, "fresh-key", teamPayload("Fresh", "team-a")));
+        assertForbidden(deleteAs(TestUsers.DEVELOPER, id.toString(), ""));
+        assertForbidden(getAs(TestUsers.DEVELOPER, "/api/v1/environments/" + id));
+        assertForbidden(getAs(TestUsers.DEVELOPER, "/api/v1/environments/" + id + "/operations"));
+        assertForbidden(getAs(TestUsers.DEVELOPER, "/api/v1/operations/" + uuid(first.json(), "operationId")));
+        assertCounts(3);
+        jdbc.update("INSERT INTO account_team_memberships VALUES (?, 'team-a')", TestUsers.DEVELOPER);
+        assertEquals(first.json(), postAs(TestUsers.DEVELOPER, "shared-key", teamPayload("Shared", "team-a")).json());
+        assertCounts(3);
+    }
+
+    @Test
+    void legacyEmptyScopeIsPreservedAndOnlyOperatorsCanReplayIt() throws Exception {
+        seedTeams();
+        var original = post("legacy-key", payload("Legacy", 1));
+        UUID id = UUID.fromString(uuid(original.json(), "environmentId"));
+        jdbc.update("UPDATE idempotency_requests SET scope = '' WHERE key = 'legacy-key'");
+        jdbc.update("UPDATE environments SET created_by = NULL WHERE id = ?", id);
+        for (String operator : List.of(TestUsers.OPERATOR, TestUsers.SECOND_OPERATOR)) {
+            assertEquals(original.json(), postAs(operator, "legacy-key", payload("Legacy", 1)).json());
+            assertError(postAs(operator, "legacy-key", payload("Different", 1)), 409);
+        }
+        assertForbidden(postAs(TestUsers.DEVELOPER, "legacy-key", payload("Legacy", 1)));
+        assertForbidden(postAs(TestUsers.CLEANUP, "legacy-key", payload("Legacy", 1)));
+        assertCounts(1);
+        assertEquals("", jdbc.queryForObject("SELECT scope FROM idempotency_requests", String.class));
+        var preserved = get("/api/v1/environments/" + id);
+        assertTrue(preserved.json().path("teamId").isNull());
+        assertTrue(preserved.json().path("createdBy").isNull());
+        var independent = postAs(TestUsers.DEVELOPER, "legacy-key", teamPayload("Legacy", "team-a"));
+        assertEquals(202, independent.status(), independent.body());
+        assertNotEquals(original.json().path("environmentId"), independent.json().path("environmentId"));
+        assertCounts(2);
+        finishCreation(id, "READY");
+        assertEquals(202, deleteAs(TestUsers.SECOND_OPERATOR, id.toString(), "").status());
+    }
+
+    @Test
+    void cleanupCanListGloballyButCannotReadDetailsHistoryOperationsOrMetrics() throws Exception {
+        seedTeams();
+        var created = postAs(TestUsers.DEVELOPER, "cleanup-team", teamPayload("Expired", "team-a"));
+        UUID id = UUID.fromString(uuid(created.json(), "environmentId"));
+        finishCreation(id, "READY");
+        for (String path : List.of("/api/v1/environments/" + id, "/api/v1/environments/" + id + "/operations",
+                "/api/v1/operations/" + uuid(created.json(), "operationId"), "/api/v1/operations/metrics")) {
+            assertForbidden(getAs(TestUsers.CLEANUP, path));
+        }
+        assertForbidden(deleteAs(TestUsers.CLEANUP, id.toString(), ""));
+        assertForbidden(postAs(TestUsers.CLEANUP, "cleanup-team", teamPayload("Expired", "team-a")));
+        assertEquals(1, getAs(TestUsers.CLEANUP, "/api/v1/environments").json().path("totalElements").asInt());
+        assertCounts(1);
+    }
+
+    @Test
+    void cleanupGuardedDeleteReplayStillRequiresExpiryCutoffEligibility() throws Exception {
+        seedTeams();
+        var created = postAs(TestUsers.DEVELOPER, "cleanup-replay", teamPayload("Expired", "team-a"));
+        UUID id = UUID.fromString(uuid(created.json(), "environmentId"));
+        finishCreation(id, "READY");
+        Instant expiry = Instant.now().minusSeconds(3600).truncatedTo(ChronoUnit.MICROS);
+        jdbc.update("UPDATE environments SET expires_at = ?, created_at = ? WHERE id = ?",
+                java.sql.Timestamp.from(expiry), java.sql.Timestamp.from(expiry.minusSeconds(3600)), id);
+        String cutoff = "?expiredBefore=" + URLEncoder.encode(expiry.toString(), StandardCharsets.UTF_8);
+        var deletion = deleteAs(TestUsers.CLEANUP, id.toString(), cutoff);
+        assertEquals(202, deletion.status(), deletion.body());
+        assertEquals(deletion.json(), deleteAs(TestUsers.CLEANUP, id.toString(), cutoff).json());
+        assertError(deleteAs(TestUsers.CLEANUP, id.toString(), "?expiredBefore="
+                + URLEncoder.encode(expiry.minusSeconds(1).toString(), StandardCharsets.UTF_8)), 409);
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM operations", Integer.class));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM audit_events", Integer.class));
+        assertEquals("DELETING", jdbc.queryForObject("SELECT status FROM environments WHERE id = ?", String.class, id));
+    }
+
+    private void seedTeams() {
+        jdbc.update("INSERT INTO platform_teams VALUES ('team-a'), ('team-b')");
+        for (String user : List.of(TestUsers.DEVELOPER, TestUsers.TEAMMATE)) {
+            jdbc.update("INSERT INTO account_team_memberships VALUES (?, 'team-a')", user);
+        }
+        jdbc.update("INSERT INTO account_team_memberships VALUES (?, 'team-b')", TestUsers.OTHER_DEVELOPER);
+    }
+
+    private String teamPayload(String name, String team) {
+        return mapper.writeValueAsString(Map.of("name", name, "templateId", "sample-service",
+                "ttlHours", 1, "teamId", team));
+    }
+
+    private ApiResponse postAs(String username, String key, String body) throws Exception {
+        return request(port, "POST", "/api/v1/environments", body,
+                Map.of("Authorization", TestUsers.basic(username), "Idempotency-Key", key));
+    }
+
+    private ApiResponse getAs(String username, String path) throws Exception {
+        return request(port, "GET", path, null, Map.of("Authorization", TestUsers.basic(username)));
+    }
+
+    private ApiResponse deleteAs(String username, String id, String query) throws Exception {
+        return request(port, "DELETE", "/api/v1/environments/" + id + query, null,
+                Map.of("Authorization", TestUsers.basic(username)));
     }
 
     private void assertUnauthenticated(ApiResponse response) {
@@ -1028,7 +1298,7 @@ class PlatformLabApplicationTests {
     }
 
     private ApiResponse get(String path) throws Exception {
-        return request(port, "GET", path, null, Map.of());
+        return request(port, "GET", path, null, Map.of("Authorization", TestUsers.basic(TestUsers.OPERATOR)));
     }
 
     private ApiResponse request(int targetPort, String method, String path, String body, Map<String, String> headers)

@@ -108,8 +108,10 @@ class DeploymentTests(unittest.TestCase):
             raise RuntimeError(f"Compose {arguments[0]} failed:\n{result.stdout}")
         return result.stdout
 
-    def request(self, path, method="GET", body=None, authenticated=False, headers=None):
+    def request(self, path, method="GET", body=None, authenticated=None, headers=None):
         headers = dict(headers or {})
+        if authenticated is None:
+            authenticated = path.startswith("/api/v1/")
         if authenticated:
             token = base64.b64encode(
                 ("deployment-test:" + self.password).encode()).decode()
@@ -133,6 +135,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("max-age=", headers["Strict-Transport-Security"])
         self.assertEqual("nosniff", headers["X-Content-Type-Options"])
         self.assertEqual(200, self.request("/api/v1/environments")[0])
+        self.assertEqual(401, self.request("/api/v1/environments", authenticated=False)[0])
         self.assertEqual(404, self.request("/actuator/health/readiness")[0])
         self.assertEqual(404, self.request("/nginx.conf")[0])
 
@@ -140,8 +143,8 @@ class DeploymentTests(unittest.TestCase):
         payload = {"name": "Deployment smoke", "templateId": "sample-service", "ttlHours": 1}
         headers = {"Idempotency-Key": secrets.token_hex(16)}
         path = "/api/v1/environments"
-        self.assertEqual(401, self.request(path, "POST", payload, headers=headers)[0])
-        self.assertEqual(401, self.request("/api/v1/me")[0])
+        self.assertEqual(401, self.request(path, "POST", payload, False, headers)[0])
+        self.assertEqual(401, self.request("/api/v1/me", authenticated=False)[0])
         status, _, body = self.request(path, "POST", payload, True, headers)
         self.assertEqual(202, status)
         created = json.loads(body)
@@ -150,7 +153,12 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(created, json.loads(replay))
         environment_path = path + "/" + created["environmentId"]
         self.assertEqual(200, self.request(environment_path)[0])
-        self.assertEqual(401, self.request(environment_path, "DELETE")[0])
+        for read_path in (environment_path, environment_path + "/operations",
+                          "/api/v1/operations/" + created["operationId"],
+                          "/api/v1/operations/metrics"):
+            self.assertEqual(401, self.request(read_path, authenticated=False)[0])
+            self.assertEqual(200, self.request(read_path)[0])
+        self.assertEqual(401, self.request(environment_path, "DELETE", authenticated=False)[0])
         # The API-only stack leaves creation pending, so deletion must still reject it.
         self.assertEqual(409, self.request(environment_path, "DELETE", authenticated=True)[0])
         self.assertEqual(409, self.request(

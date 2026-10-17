@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { ApiError, deleteEnvironment } from '../../api/client'
 import type { AcceptedDeletion, Environment } from '../../api/client'
-import { isOperator, useSession } from '../../api/session'
+import { canManage, getSessionVersion, useSession } from '../../api/session'
 
 export function DeleteEnvironment({ item, unavailable, onRefresh }: {
   item: Environment
@@ -22,7 +22,7 @@ export function DeleteEnvironment({ item, unavailable, onRefresh }: {
     && !['PENDING', 'RUNNING'].includes(item.latestOperation?.status ?? '')
   const retryFailedDeletion = item.status === 'DELETE_FAILED'
     && item.latestOperation?.id === accepted?.operationId && item.latestOperation?.status === 'FAILED'
-  const authorized = isOperator(useSession())
+  const authorized = canManage(useSession(), item.teamId)
   const disabled = unavailable || !eligible || !authorized || busy || (!!accepted && !retryFailedDeletion)
 
   useEffect(() => () => controller.current?.abort(), [])
@@ -40,17 +40,18 @@ export function DeleteEnvironment({ item, unavailable, onRefresh }: {
     event.preventDefault()
     if (controller.current || disabled || confirmation !== identity) return
     const current = new AbortController()
+    const version = getSessionVersion()
     controller.current = current
     setBusy(true)
     setError(undefined)
     try {
       const result = await deleteEnvironment(item.id, current.signal)
-      if (current.signal.aborted) return
+      if (current.signal.aborted || getSessionVersion() !== version) return
       setAccepted(result)
       close()
       onRefresh()
     } catch (failure) {
-      if (current.signal.aborted) return
+      if (current.signal.aborted || getSessionVersion() !== version) return
       setError(failure instanceof ApiError ? failure : new ApiError('Unable to confirm deletion. Refresh status before retrying.'))
       onRefresh()
     } finally {
@@ -72,7 +73,7 @@ export function DeleteEnvironment({ item, unavailable, onRefresh }: {
     <p id="delete-guidance" className="muted">
       Deletion removes this environment's resources and cannot be undone.
       {' '}Available only for READY, FAILED, or DELETE_FAILED environments with no pending or running operation.
-      {!authorized && ' Requires an OPERATOR sign-in.'}
+      {!authorized && ' Requires a team DEVELOPER or OPERATOR sign-in. CLEANUP portal access is read-only.'}
     </p>
     {accepted && <p role="status" className="submission-status">
       Deletion accepted ({accepted.operationStatus}). This does not mean cleanup is complete.

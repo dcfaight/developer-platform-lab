@@ -1,4 +1,4 @@
-import { authorizationHeader, clearSession, setSession, type Identity } from './session'
+import { authorizationHeader, clearSession, getSession, getSessionVersion, setSession, type Identity } from './session'
 
 export interface OperationSummary {
   id: string
@@ -14,6 +14,8 @@ export interface Environment {
   name: string
   namespace: string
   templateId: string
+  teamId: string | null
+  createdBy: string | null
   status: string
   expiresAt: string
   createdAt: string
@@ -54,6 +56,7 @@ export interface CreateEnvironmentRequest {
   name: string
   templateId: 'sample-service'
   ttlHours: number
+  teamId?: string
 }
 
 export interface AcceptedEnvironment {
@@ -135,6 +138,7 @@ export function environment(value: unknown): Environment {
   return {
     id: text(item.id), name: text(item.name), namespace: text(item.namespace),
     templateId: text(item.templateId), status: text(item.status),
+    teamId: nullableText(item.teamId), createdBy: nullableText(item.createdBy),
     expiresAt: text(item.expiresAt), createdAt: text(item.createdAt), updatedAt: text(item.updatedAt),
     latestOperation: item.latestOperation === null ? null : summary(item.latestOperation),
   }
@@ -167,12 +171,20 @@ export const environmentPage = (value: unknown) => page(value, environment)
 export const operationPage = (value: unknown) => page(value, operation)
 
 export async function read<T>(path: string, decode: Decoder<T>, signal?: AbortSignal): Promise<T> {
+  const version = getSessionVersion()
+  if (!getSession()) throw new ApiError('Sign in to view environments.', undefined, 'UNAUTHENTICATED')
   let response: Response
   try {
-    response = await fetch(`/api/v1${path}`, { signal, headers: { Accept: 'application/json' } })
+    response = await fetch(`/api/v1${path}`, { signal, headers: { Accept: 'application/json', ...authorizationHeader() } })
   } catch (error) {
+    assertSession(version)
     if (signal?.aborted) throw error
     throw new ApiError('Cannot reach the API. Check that the backend is running and try again.')
+  }
+  assertSession(version)
+  if (response.status === 401) {
+    clearSession()
+    throw new ApiError('Sign in again: the API did not accept your credentials.', undefined, 'UNAUTHENTICATED')
   }
   if (!response.ok) {
     let message = `The API request failed (HTTP ${response.status}).`
@@ -184,19 +196,22 @@ export async function read<T>(path: string, decode: Decoder<T>, signal?: AbortSi
     } catch {
       // Proxy errors may not have the backend's JSON error shape.
     }
+    assertSession(version)
     throw new ApiError(message, requestId)
   }
   let body: unknown
   try {
     body = await response.json()
   } catch {
+    assertSession(version)
     throw new ApiError('The API returned an unexpected response.')
   }
+  assertSession(version)
   return decode(body)
 }
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i
-const ALLOWED_FIELDS = new Set(['name', 'templateId', 'ttlHours'])
+const ALLOWED_FIELDS = new Set(['name', 'templateId', 'ttlHours', 'teamId'])
 const CREATION_TIMEOUT_MS = 15_000
 
 function fieldErrors(value: unknown): ApiFieldError[] {
@@ -229,14 +244,19 @@ function acceptedEnvironment(value: unknown): AcceptedEnvironment {
   }
 }
 
-function authorizationError(status: number, requestId: string | undefined, action: string): ApiError | undefined {
+function assertSession(version: number): void {
+  if (getSessionVersion() !== version) throw new ApiError('The session changed.', undefined, 'SESSION_CHANGED')
+}
+
+function authorizationError(status: number, requestId: string | undefined, action: string, version: number): ApiError | undefined {
+  assertSession(version)
   if (status === 401) {
     clearSession()
     return new ApiError(`Sign in again: the API did not accept your credentials, so the ${action} was not accepted.`,
       requestId, 'UNAUTHENTICATED')
   }
   if (status === 403) {
-    return new ApiError(`Your account is not permitted to ${action === 'deletion' ? 'delete' : 'create'} environments. An OPERATOR account is required.`,
+    return new ApiError(`Your account is not permitted to ${action === 'deletion' ? 'delete' : 'create'} this environment. A team DEVELOPER or OPERATOR account is required.`,
       requestId, 'FORBIDDEN')
   }
   return undefined
@@ -250,6 +270,8 @@ function basicCredential(username: string, password: string): string {
 }
 
 export async function signIn(username: string, password: string): Promise<Identity> {
+  clearSession()
+  const version = getSessionVersion()
   if (!/^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$/.test(username) || !password) {
     throw new ApiError('Enter a valid username and password.')
   }
@@ -258,8 +280,10 @@ export async function signIn(username: string, password: string): Promise<Identi
   try {
     response = await fetch('/api/v1/me', { headers: { Accept: 'application/json', Authorization: authorization } })
   } catch {
+    assertSession(version)
     throw new ApiError('Cannot reach the API. Check that the backend is running and try again.')
   }
+  assertSession(version)
   const requestId = requestIdentifier(response.headers.get('X-Request-Id'))
   if (response.status === 401) throw new ApiError('Sign-in failed. Check the username and password.', requestId, 'UNAUTHENTICATED')
   if (!response.ok) throw new ApiError(`Sign-in could not be completed (HTTP ${response.status}).`, requestId)
@@ -270,15 +294,18 @@ export async function signIn(username: string, password: string): Promise<Identi
     const confirmed = text(body.username)
     // Account lookup ignores case; keep the configured spelling the audit log records.
     if (confirmed.toLowerCase() !== username.toLowerCase()) throw new Error('Unexpected identity')
-    identity = { username: confirmed, roles }
+    identity = { username: confirmed, roles, teams: array(body.teams, text) }
   } catch {
+    assertSession(version)
     throw new ApiError('The API returned an unexpected sign-in response.', requestId)
   }
+  assertSession(version)
   setSession({ identity, authorization })
   return identity
 }
 
 export async function deleteEnvironment(id: string, signal?: AbortSignal): Promise<AcceptedDeletion> {
+  const version = getSessionVersion()
   const controller = new AbortController()
   const abort = () => controller.abort()
   signal?.addEventListener('abort', abort, { once: true })
@@ -292,10 +319,12 @@ export async function deleteEnvironment(id: string, signal?: AbortSignal): Promi
         method: 'DELETE', signal: controller.signal, headers: { Accept: 'application/json', ...authorizationHeader() },
       })
     } catch (error) {
+      assertSession(version)
       if (signal?.aborted) throw error
       throw new ApiError('The connection was interrupted or timed out. Deletion may have been accepted. Check the status or retry deletion for this same environment safely.',
         undefined, undefined, [], true)
     }
+    assertSession(version)
     requestId = requestIdentifier(response.headers.get('X-Request-Id'))
     if (!response.ok) {
       let body: JsonObject = {}
@@ -306,7 +335,7 @@ export async function deleteEnvironment(id: string, signal?: AbortSignal): Promi
       }
       requestId = requestIdentifier(body.requestId) ?? requestId
       const code = typeof body.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(body.code) ? body.code : undefined
-      const denied = authorizationError(response.status, requestId, 'deletion')
+      const denied = authorizationError(response.status, requestId, 'deletion', version)
       if (denied) throw denied
       throw new ApiError(response.status >= 500
         ? 'The server could not confirm deletion. It may have been accepted. Check the status or retry deletion for this same environment safely.'
@@ -315,6 +344,7 @@ export async function deleteEnvironment(id: string, signal?: AbortSignal): Promi
     }
     try {
       const item = object(await response.json())
+      assertSession(version)
       if (response.status !== 202 || item.environmentId !== id
         || typeof item.operationId !== 'string' || !UUID.test(item.operationId)
         || item.environmentStatus !== 'DELETING'
@@ -324,6 +354,7 @@ export async function deleteEnvironment(id: string, signal?: AbortSignal): Promi
       return { environmentId: id, operationId: item.operationId,
         environmentStatus: 'DELETING', operationStatus: item.operationStatus }
     } catch {
+      assertSession(version)
       throw new ApiError('The API returned an unexpected deletion response. Deletion may have been accepted. Check the status or retry deletion for this same environment safely.',
         requestId, undefined, [], true)
     }
@@ -337,6 +368,7 @@ export async function createEnvironment(
   request: CreateEnvironmentRequest,
   idempotencyKey: string,
 ): Promise<AcceptedEnvironment> {
+  const version = getSessionVersion()
   const controller = new AbortController()
   let timedOut = false
   const timeout = setTimeout(() => {
@@ -359,11 +391,13 @@ export async function createEnvironment(
         body: JSON.stringify(request),
       })
     } catch {
+      assertSession(version)
       throw new ApiError(timedOut
         ? 'The request timed out. The environment may have been accepted; retry the same request safely.'
         : 'The connection was interrupted. The environment may have been accepted; retry the same request safely.',
       undefined, undefined, [], true)
     }
+    assertSession(version)
 
     const headerRequestId = requestIdentifier(response.headers.get('X-Request-Id'))
     if (!response.ok) {
@@ -376,7 +410,7 @@ export async function createEnvironment(
       const code = typeof body.code === 'string' ? body.code : undefined
       const requestId = requestIdentifier(body.requestId) ?? headerRequestId
       const errors = fieldErrors(body.fieldErrors)
-      const denied = authorizationError(response.status, requestId, 'request')
+      const denied = authorizationError(response.status, requestId, 'request', version)
       if (denied) throw denied
       if (response.status === 400 && code === 'VALIDATION_ERROR') {
         throw new ApiError('Some fields need attention.', requestId, code, errors)
@@ -399,9 +433,11 @@ export async function createEnvironment(
     try {
       body = await response.json()
     } catch {
+      assertSession(version)
       throw new ApiError('The API returned an unexpected creation response.',
         headerRequestId, undefined, [], true)
     }
+    assertSession(version)
     try {
       return acceptedEnvironment(body)
     } catch {
