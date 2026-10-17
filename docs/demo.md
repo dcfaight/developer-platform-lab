@@ -352,7 +352,7 @@ operator instructions to edit the database or weaken the 1–24-hour TTL validat
 
 ## Troubleshooting and presenter fallback
 
-Current cleanup-specific [verification evidence and remaining gates](../automation/README.md#evidence-and-remaining-gates-for-this-change)
+Current cleanup-specific [verification evidence and remaining gates](../automation/README.md#evidence-and-remaining-gates-for-the-original-cleanup-change)
 distinguish fake HTTP, real backend/PostgreSQL, browser, and kind results. The
 historical deletion evidence below is not a new expiration end-to-end pass.
 

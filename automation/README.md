@@ -173,7 +173,7 @@ The harness and offline tests are implementation evidence only. A measured
 baseline requires a successful retained run on the named disposable target with
 its configuration and limitations. No measured capacity result is established
 by adding this tooling. The
-[roadmap](../docs/operating-model-and-sequence.md#phase-status-and-next-sequence)
+[roadmap](../docs/operating-model-and-sequence.md#current-delivery-gates)
 continues to require that evidence separately.
 
 ## Manual use
@@ -364,7 +364,11 @@ is superseded by the credential requirements above.
 - **Hosted CI:** runs require maintainer approval (`action_required`); local
   results are not a hosted-CI pass.
 
-Remaining gates: approved hosted CI, completed automated review/security scan,
-and a working local kind/browser walkthrough. Offset-page concurrency limitations,
-trusted-local-only cleanup transport, and remaining deployment hardening remain;
-passing tests alone do not establish production readiness.
+These are the original cleanup change's recorded verification gaps, not a claim
+that current hosted CI or review is failing. Check current run/review results and
+record a fresh disposable kind/browser walkthrough before treating the cleanup
+acceptance gate as closed; see the
+[canonical roadmap](../docs/operating-model-and-sequence.md#current-delivery-gates).
+Offset-page concurrency limitations, trusted-local-only cleanup transport, and
+remaining deployment hardening remain; passing tests alone do not establish
+production readiness.

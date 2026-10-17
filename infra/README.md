@@ -98,13 +98,16 @@ limitation; use only the dedicated disposable cluster described here.
   seven opt-in deployment/K3s tests were skipped because no target was selected.
 - `kubectl kustomize infra/kubernetes`: passed.
 
-The broader `PLATFORM_KIND_TEST=true ./mvnw --batch-mode
+In this increment's earlier local-kind validation, the broader
+`PLATFORM_KIND_TEST=true ./mvnw --batch-mode
 -Dtest=KindProvisioningTests,KindWorkerFlowTests test` run did not pass in this
 local environment: one existing sample readiness check timed out after 120
 seconds, and the worker flow remained `WAITING`. The disposable cluster showed
 repeated sample HTTP probe timeouts and non-ready CoreDNS/local-path pods. The
-direct quota/LimitRange test passed independently; real-kind lifecycle readiness
-and live K3s behavior remain unverified. The test cluster was deleted after
+direct quota/LimitRange test passed independently. These are results for that
+dated run, not a new failure report; see the
+[current roadmap](../docs/operating-model-and-sequence.md) for the later K3s
+lifecycle evidence and remaining gates. The test cluster was deleted after
 validation. Frontend tests were not run because frontend code was unchanged.
 
 ## Hardened single-host deployment (API-only)
@@ -266,12 +269,14 @@ namespace deletion, backup recovery, certificate renewal or production readiness
 
 ## Local K3s platform
 
-`kubernetes/` is a first-pass Kustomize package for a **separate, single-node K3s**
+`kubernetes/` is a Kustomize package for a **separate, single-node K3s**
 installation: one backend API, one frontend, PostgreSQL 18.6 with a 5Gi
 `local-path` PVC, ClusterIP Services, generated ConfigMaps, external Secrets, and
 a Traefik TLS Ingress. It reuses the existing Dockerfiles without changing Compose
-or the host-run kind workflow. The [baseline](../docs/pre-kubernetes.md) remains
-the roadmap, not evidence of completed lifecycle validation.
+or the host-run kind workflow. K3s deployment is implemented. Consult the
+[current roadmap](../docs/operating-model-and-sequence.md) for outstanding
+validation gates; the [pre-Kubernetes assessment](../docs/pre-kubernetes.md)
+is archived historical context.
 
 **Boundary:** unlike the API-only Compose deployment, this package explicitly
 overrides the `deploy` profile with `PLATFORM_WORKER_ENABLED=true` and
@@ -494,8 +499,10 @@ No successful run is implied by adding this check; record actual results.
 the worker-enabled K3s path was manually validated on the disposable K3s cluster
 using context `default` and HTTPS ingress `platform-test.local` at `192.168.1.5`.
 The create → provision → ready → authenticated delete → namespace cleanup
-validation is complete and working. This is not production readiness or evidence of an
-automated lifecycle-test run; backup/restore and restart persistence remain unverified.
+manual validation passed. This is not production readiness or evidence of an
+automated lifecycle-test run. See the
+[current roadmap](../docs/operating-model-and-sequence.md) for separate restore,
+automated lifecycle, and restart-persistence gates.
 
 The recorded environment was `demo` (`fab18d99-7a86-4886-8960-31277137837f`),
 with namespace `env-fab18d997a864886896031277137837f`.
@@ -615,12 +622,13 @@ backup recovery.
   useful defaults, not validated production hardening.
 - A separate [disposable logical backup/restore drill](#disposable-k3s-logical-backuprestore)
   is available; it does not test the live PVC or restart persistence.
-- **TODO:** retain successful logical restore evidence and test live restart
-  persistence on K3s; run the automated
-  authenticated lifecycle check separately from the recorded manual validation;
-  add network policies, database role separation, secret encryption/rotation,
-  certificate renewal and access review.
-  No expiration scheduler or cleanup-CLI TLS extension is included.
+- **Open operational work:** retain logical-restore evidence and test live
+  restart persistence on K3s; run the automated authenticated lifecycle check
+  separately from the recorded manual validation; review network policies,
+  database role separation, secret encryption/rotation, certificate renewal,
+  and access. Gate status is maintained in the
+  [current roadmap](../docs/operating-model-and-sequence.md). No expiration
+  scheduler or cleanup-CLI TLS extension is included.
 
 ## Disposable K3s logical backup/restore
 
