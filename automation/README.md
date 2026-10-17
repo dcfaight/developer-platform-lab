@@ -12,6 +12,170 @@ for safety gates, image preparation, evidence retention and limitations.
 Its offline safety tests run in normal unittest discovery; the live test is
 skipped unless `PLATFORM_BACKUP_RESTORE_TEST=true`.
 
+## Opt-in lifecycle capacity baseline
+
+`capacity_baseline.py` measures **10 existing `sample-service` environment
+lifecycles with at most 2 concurrent workflows, including cleanup**. A slot
+covers create → `READY` → delete → namespace absence, not just HTTP requests.
+This is a small experimental **baseline measurement**, not an autoscaling
+system, a monitoring stack, a saturation test, or a production-capacity claim.
+It does not model 3,000 developers, concurrent application traffic, realistic
+developer workloads, multi-replica throughput, or tenant isolation.
+
+### Prepare a disposable target
+
+1. Use a disposable cluster and platform installation from this revision with
+   the existing provisioning worker enabled. Do not run against shared or
+   production infrastructure. Do not change the worker, database/PVC, resource
+   budgets, RBAC, or ownership controls to make this benchmark pass.
+2. Check the explicit kubeconfig context and platform namespace. Forward the
+   matching backend API onto loopback using that same context/namespace; do not
+   forward an unrelated or shared API. The harness never selects the current
+   context implicitly, follows redirects, or accepts a remote API URL.
+3. Use an existing `OPERATOR` account for API operations/metrics. Keep credentials
+   in the environment, never arguments, shell traces, reports, or pasted logs.
+   Existing Kubernetes read access is needed for context collection, owned
+   namespace observation, and absence verification. Resource sampling is
+   optional: metrics-server is not installed by the harness, and unavailable
+   sampling must remain visibly unavailable. Do not broaden permissions.
+   Reserve the installation for one benchmark invocation: stop unrelated
+   lifecycle requests and other harnesses, and inspect/recover previous runs'
+   leftovers first. The concurrency limit is per run, not a cluster-wide quota
+   or distributed lock. Record any pre-existing workload as background load.
+4. Create a private artifacts directory **outside the checkout**. Record whether
+   images are cold, warm, or unknown; do not claim a cold-cache result merely
+   because the environments are new. Preserve the same node layout, images,
+   worker settings, and cache conditions when comparing runs. Host-run or
+   externally supplied configuration that cannot be observed must be recorded
+   as unknown rather than inferred from repository defaults.
+
+### Run deliberately
+
+From the repository root, in a shell without tracing:
+
+```sh
+# In another terminal, forward ONLY the disposable installation:
+kubectl --context disposable-k3s -n platform-lab \
+  port-forward service/backend 8080:8080
+
+mkdir -m 700 /tmp/platform-capacity-evidence
+export PLATFORM_BENCHMARK_USERNAME=operator
+read -r -s -p 'Operator password: ' PLATFORM_BENCHMARK_PASSWORD; echo
+export PLATFORM_BENCHMARK_PASSWORD
+export PLATFORM_CAPACITY_BASELINE=true
+python3 automation/capacity_baseline.py \
+  --confirm-disposable \
+  --context disposable-k3s \
+  --platform-namespace platform-lab \
+  --api-base-url http://127.0.0.1:8080/api/v1 \
+  --worker-host cluster \
+  --cache-condition unknown \
+  --artifacts /tmp/platform-capacity-evidence
+unset PLATFORM_BENCHMARK_PASSWORD PLATFORM_CAPACITY_BASELINE
+```
+
+Replace the context and namespace deliberately; these example names are not
+target discovery. Both the environment opt-in and confirmation flag are
+required. `--help` lists the bounded deadline controls. The workload and
+concurrency are deliberately fixed, not inferred from namespace quotas.
+Slots are refilled as workflows finish, rather than executing five fixed pairs;
+admission and evidence collection can introduce client-side gaps.
+No benchmark invocation is added to CI or a scheduler; normal CI runs only the
+offline safety tests.
+
+For a host-run backend, select `--worker-host host` and explicitly supply
+`--worker-enabled true --worker-poll-delay-ms 1000` only if those are the actual
+effective settings. Unobserved settings remain unknown, not verified defaults.
+The normal bounds are 1,800 seconds overall, 600 seconds per lifecycle including
+300 seconds reserved for cleanup, 10 seconds per HTTP request, and 5 seconds per
+Kubernetes read. Polling defaults to 1 second and resource sampling to 15
+seconds. Cleanup remains inside the overall and lifecycle deadlines; it is not
+an unbounded extra phase.
+
+### Evidence and interpretation
+
+Retain the private run directory even when the command fails. Its durable JSON
+`manifest.json` records generated names, original idempotency keys, accepted
+environment/operation IDs, mutation intent, timings, and unresolved leftovers.
+It is both the mutation journal and machine-readable evidence; `summary.txt`
+provides the short readable result. Together they identify the selected
+target, revision, workload, concurrency, observed cluster/node configuration,
+images, worker context, cache declaration, and measurement availability.
+Configuration collection is allowlisted: it must not dump kubeconfig, Secrets,
+full pod specifications, database contents, credentials, or raw error bodies.
+
+- **API latency** measures each client HTTP attempt. A successful replay after
+  ambiguous acceptance is not the original acceptance latency; include attempts,
+  errors, and recovery when interpreting results.
+  Request timing records cover create/delete mutation attempts, not GET polls.
+- **Queue wait and operation duration** come from this run's operation IDs and
+  server timestamps. Queue wait is first start minus creation; end-to-end
+  operation duration includes retries/waits. Readiness and namespace-absence
+  observations include client polling delay. Missing values are not zero.
+  Synchronize clocks; do not subtract client and server clocks to infer queue
+  time.
+  Concurrency describes client lifecycle workflows, not worker threads. The
+  existing worker claims one operation per fixed-delay poll; a single backend
+  instance interleaves work rather than launching two provisioning threads.
+  Poll cadence, retries, and worker replica count affect these measurements;
+  the benchmark does not change them.
+- **Completions** require `READY`, successful deletion, and confirmed namespace
+  absence. Report both completed/10 and completed per elapsed minute, including
+  failures and cleanup time. Early termination is not a successful smaller run.
+- **Operation-metrics snapshots** are supporting context from persisted platform
+  history, not interval counters or this run's latency distribution. Other work
+  and older operations can affect them. The preflight snapshot must be valid
+  with the worker enabled before any create. Missing final metrics make the
+  evidence incomplete and the exit nonzero even if all environments cleaned up.
+- **Resource samples**, when available, are sampled CPU/memory observations,
+  not peaks or proof of headroom. Each verified READY workload also gets a
+  bounded sample before deletion, so brief lifetimes do not rely solely on
+  periodic sampling. Unavailable/partial sampling prevents resource capacity
+  conclusions. Cached images, node contention, polling cadence, and database
+  history all affect comparability.
+
+### Failure and recovery
+
+All waits and requests are bounded. New workflows stop after a failure rather
+than accumulating unresolved environments; already active workflows keep their
+slots through bounded cleanup. Ambiguous create attempts stop admission even
+if same-key replay later resolves them; that shortened run is not a passing
+10-environment baseline. Cleanup uses only the backend DELETE API after
+checking the run's accepted mapping, generated name, creator, template,
+canonical namespace, and original create operation. The backend's Kubernetes
+ownership/precondition enforcement remains authoritative. The harness never
+deletes namespaces directly, strips finalizers, edits SQL, or touches a PVC.
+Successful readiness also requires observing the matching owned namespace in
+the explicitly selected context; absence in a different cluster is not proof
+of deletion.
+
+A timeout, interrupt, ownership mismatch, failed delete, or uncertain acceptance
+is **not** success. Inspect the retained manifest and leftovers before doing
+anything else. Do not start another benchmark to recover the old one.
+For an ambiguous create, use the **same authenticated account, original
+`Idempotency-Key`, and identical request body** from that run to recover the
+original IDs; a fresh key risks a duplicate. Inspect the environment and original
+operation before any manual delete. For an ambiguous delete, inspect detail,
+latest operation, and history; do not blindly resend DELETE. A failed ownership
+check requires investigation, not bypass. Follow the
+[existing completion/recovery policy](#completionrecovery-runbook).
+
+An abrupt process kill or machine failure can prevent cleanup. Mutation intent
+is persisted before requests so an operator can investigate; the tool is not a
+crash-proof controller and does not automatically resume mutations from an
+edited manifest. Retain partial evidence and explicitly record every unresolved
+environment or unknown acceptance. Never interpret a nonzero exit as clean
+completion.
+
+### Validation gate
+
+The harness and offline tests are implementation evidence only. A measured
+baseline requires a successful retained run on the named disposable target with
+its configuration and limitations. No measured capacity result is established
+by adding this tooling. The
+[roadmap](../docs/operating-model-and-sequence.md#phase-status-and-next-sequence)
+continues to require that evidence separately.
+
 ## Manual use
 
 Start the matching backend from this revision using the

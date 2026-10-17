@@ -53,6 +53,12 @@ The next delivery sequence is:
    target-cluster evidence remains required.
    This is not PITR, HA, or production recovery validation.
 4. Measure capacity with explicit workload and concurrency targets.
+   An opt-in [lifecycle baseline harness](../automation/README.md#opt-in-lifecycle-capacity-baseline)
+   defines 10 `sample-service` workflows with concurrency 2 including cleanup.
+   Implementation/offline tests do not close this gate: a successful retained
+   run with target configuration, timings, failures, and resource-measurement
+   availability remains required. This is not an autoscaling system, a
+   monitoring stack, or a production-capacity claim.
 
 Nightly CI is supporting backlog automation, not a substitute for these
 milestones. None of these steps establishes production readiness until its
