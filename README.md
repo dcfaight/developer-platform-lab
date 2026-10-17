@@ -36,6 +36,7 @@ and its proposed execution sequence.
 | Cleanup, logical restore, and capacity tooling | [Automation guide](automation/README.md) |
 | API contract | [API reference](docs/api.md) |
 | Accepted architecture decisions | [Decision records](docs/decisions/) |
+| Repository rename preparation and verification | [Repository rename checklist](docs/repository-rename-readiness.md) |
 | Historical pre-Kubernetes assessment | [Archive notice](docs/pre-kubernetes.md) |
 | Backend and frontend setup/contracts | [Backend guide](backend/README.md) · [Frontend guide](frontend/README.md) |
 
@@ -232,7 +233,7 @@ flowchart TD
 ## 7. Repository Structure
 
 ```text
-developer-platform-lab/
+internal-developer-platform/
 ├── frontend/
 │   ├── src/
 │   │   ├── api/
