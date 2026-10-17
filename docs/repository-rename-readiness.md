@@ -1,21 +1,20 @@
 # Repository Rename Readiness
 
-This checklist prepares for the owner-requested rename from
+This checklist covers the owner-requested rename from
 `dcfaight/developer-platform-lab` to `dcfaight/internal-developer-platform`.
-It does not perform or claim the rename. Repository ID `1421665582` identifies
-the existing repository and must remain unchanged.
+The owner renamed the existing repository outside this PR. Current GitHub
+metadata reports the new canonical name and unchanged repository ID `1421665582`.
 
 ## Before the rename
 
-- Coordinate merging this readiness change with the owner's rename. References
-  to `internal-developer-platform` below will not resolve until the owner renames
-  the repository.
-- The owner must rename the existing repository in GitHub: **Settings > General >
-  Repository name**, enter `internal-developer-platform`, then select **Rename**.
-- A read-only GitHub search for `dcfaight/internal-developer-platform` returned
-  no matching repository, and a direct lookup returned 404. This did not
-  establish reservation/availability conclusively; confirm in GitHub while
-  performing the rename. Do not create a replacement repository.
+- The owner action was **Settings > General > Repository name**,
+  `internal-developer-platform`, **Rename**. A read-only GitHub lookup now
+  reports `dcfaight/internal-developer-platform` with repository ID `1421665582`.
+- Before the rename, a read-only search returned no matching destination and a
+  direct lookup returned 404; that was not conclusive availability proof. The
+  existing repository now occupies the name. Do not create a replacement.
+- Destination-name references below did not resolve before the rename; the
+  representative links checked after the rename now resolve.
 - The repository's README already uses the product name “Internal Developer
   Platform”; its repository-structure example now uses the desired repository
   name. No README clone command or workflow badge was found to update.
@@ -39,20 +38,22 @@ each system they operate.
 
 ## After the owner renames the repository
 
-1. Confirm the canonical repository name is
+1. [x] Confirm the canonical repository name is
    `dcfaight/internal-developer-platform` and its repository ID is still
    `1421665582`.
-2. Check that the old repository URL redirects to the new URL. Also follow
+2. [x] Check that the old repository URL redirects to the new URL. Also follow
    representative links to the [README](https://github.com/dcfaight/internal-developer-platform/blob/main/README.md),
    [ARCH-01 roadmap](https://github.com/dcfaight/internal-developer-platform/blob/main/docs/operating-model-and-sequence.md),
    and [merged PR #40](https://github.com/dcfaight/internal-developer-platform/pull/40).
-   These destination URLs are expected not to resolve before the rename.
-3. From a machine with repository access, verify the new HTTPS clone/fetch
+   All three old URLs redirected once and returned HTTP 200; the README and
+   roadmap content loaded, and GitHub reports PR #40 merged. They did not resolve
+   before the rename.
+3. [x] From a machine with repository access, verify the new HTTPS clone/fetch
    endpoint with
    `git ls-remote https://github.com/dcfaight/internal-developer-platform.git HEAD`.
-   Verify the old URL redirects as documented, but update local remotes to avoid
-   relying on redirects.
-4. In the owner's own clone, inspect and update the existing `origin`, preserving
+   The command returned `395b6574cac27a16aa5cfaf9dc42b799022a7417`; the old
+   repository URL redirects as documented.
+4. [ ] In the owner's own clone, inspect and update the existing `origin`, preserving
    its current HTTPS or SSH protocol, then verify the remote and fetch:
 
    ```sh
@@ -68,19 +69,22 @@ each system they operate.
 
    An agent cannot change or verify the owner's personal local clone; these
    commands have not been run on the owner's machine.
-5. Verify any workflow badge URLs, external hosted-action/reusable-workflow
+5. [ ] Verify any workflow badge URLs, external hosted-action/reusable-workflow
    callers, frontend OCI source metadata on the next built image, and the
    coordinated Argo CD repository URL/configuration and sync. Search accessible
    repositories and deployed systems; consumers outside this checkout remain
    unverified.
-6. If Pages is enabled by then, check its configured custom domain and site URL
+6. [ ] If Pages is enabled by then, check its configured custom domain and site URL
    separately because Pages URLs are not covered by the general redirect
    behavior.
-7. Do not recreate a repository using the old `developer-platform-lab` name;
+7. [x] Do not recreate a repository using the old `developer-platform-lab` name;
    doing so can break GitHub's redirects to this repository.
 
 ## Verification status
 
-This checklist and the safe README example update are pre-rename preparation
-only. The repository has not been renamed, and post-rename redirect, URL,
-workflow, GitOps, and owner-local-remote checks remain pending.
+The owner renamed the repository outside this PR. The canonical name and same
+repository ID, old-URL redirects for the root/README/roadmap/PR #40, and HTTPS
+`git ls-remote` reachability have been verified. The owner's personal clone was
+not changed or checked. Pages has not been rechecked since the rename, and
+external workflow consumers, deployed GitOps configuration/sync, and previously
+published image metadata remain unverified.
