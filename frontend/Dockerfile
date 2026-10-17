@@ -1,7 +1,9 @@
 FROM node:24-alpine@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f AS build
 WORKDIR /build
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN --mount=type=secret,id=build_ca \
+    if [ -f /run/secrets/build_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/build_ca; fi; \
+    npm ci
 COPY . .
 RUN npm run build
 ARG SOURCE_REVISION=development

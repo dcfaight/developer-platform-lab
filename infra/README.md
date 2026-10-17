@@ -618,3 +618,229 @@ backup recovery.
   add network policies, database role separation, secret encryption/rotation,
   certificate renewal and access review.
   No expiration scheduler or cleanup-CLI TLS extension is included.
+
+## Disposable K3s GitOps deployment and frontend rollback
+
+### Scope and controller decision
+
+This opt-in path reuses the platform Kustomize package through
+`infra/gitops/local-k3s`. Argo CD **v3.5.5** is selected for this bounded increment:
+it reconciles the existing Kustomize target and exposes the synchronized Git
+revision and deployment health without adding Helm or a release API. Its
+namespace-scoped installation and CRDs are pinned to upstream commit
+`a5038b0e2bbac1715754380ae0084df8e3d5b48c`. The GitHub advisory check for
+`github.com/argoproj/argo-cd/v3` 3.5.5 returned no advisories on 2026-10-17;
+this is not a comprehensive container vulnerability audit.
+
+The Application watches this repository's **`main` branch**, specifically
+`infra/gitops/local-k3s`. Git is authoritative; changing a digest in that path
+is a release, and a new commit reverting that change is rollback. Before these
+files merge, an operator may explicitly select the reviewed feature branch in
+the bootstrap Application; record that selection and restore `main` after merge.
+Do not use out-of-Git Application image overrides or `kubectl set image`.
+There is one local target, not dev/QA/UAT promotion or production continuity.
+
+Ownership is deliberately split:
+
+| Owner | Resources |
+| --- | --- |
+| Bootstrap administrator | Argo CD/CRDs, `platform-lab` namespace, PVC, worker service account/RBAC, cluster registration, AppProject/Application |
+| Secret administrator | Existing `platform-secrets` and `platform-tls`, supplied outside Git |
+| Argo CD | Only platform Deployments, Services, generated ConfigMaps and Ingress in `platform-lab` |
+| Existing backend worker | Dynamically provisioned `env-…` namespaces and sample workloads; never included in the GitOps target |
+
+The AppProject has no allowed cluster-scoped kinds and only the four platform
+resource kinds above. The controller/server get a Role in `platform-lab`, with
+no delete, Secret, PVC, namespace, or RBAC permissions there. The registered
+destination is namespace-limited. Automatic pruning is disabled; there is no
+Application deletion finalizer or automatic namespace creation. Do not enable
+`Replace`, `Force`, pruning, cascading deletion, or wildcard privileges to resolve
+a sync failure. Generated ConfigMaps retain their content hashes so configuration
+changes roll pods; old ConfigMaps intentionally accumulate. Only an administrator
+may garbage-collect them, after checking live pods and retained rollback revisions.
+Application deletion leaves workloads running; it is not an uninstall procedure.
+
+This limits controller resource ownership, **not trust in repository writers**:
+approved Deployment changes can execute code as the backend's powerful worker
+identity. Protect repository writes, review deployment changes, and use only a
+dedicated disposable single-node cluster. Existing worker RBAC limitations remain.
+
+### Bootstrap prerequisites and order
+
+Use the existing K3s secrets/TLS procedure above, a healthy single-node cluster,
+Docker Buildx with a `docker-container` builder, kubectl/Kustomize, `jq`, and
+trusted GitHub/registry access. No kubeconfig, password, key, or image archive
+belongs in Git. The controller needs outbound HTTPS to GitHub and its pinned
+upstream image registries; do not disable certificate verification.
+
+1. Set explicit paths/context and install the pinned CRDs/controller:
+
+   ```sh
+   export ROOT=/home/runner/work/developer-platform-lab/developer-platform-lab
+   export K3S_CONTEXT=your-disposable-k3s-context
+   ARGO_REV=a5038b0e2bbac1715754380ae0084df8e3d5b48c
+   kubectl --context "$K3S_CONTEXT" create namespace argocd
+   kubectl --context "$K3S_CONTEXT" apply --server-side \
+     -f "https://raw.githubusercontent.com/argoproj/argo-cd/$ARGO_REV/manifests/crds/application-crd.yaml" \
+     -f "https://raw.githubusercontent.com/argoproj/argo-cd/$ARGO_REV/manifests/crds/appproject-crd.yaml" \
+     -f "https://raw.githubusercontent.com/argoproj/argo-cd/$ARGO_REV/manifests/crds/applicationset-crd.yaml"
+   kubectl --context "$K3S_CONTEXT" apply -k "$ROOT/infra/gitops/controller"
+   kubectl --context "$K3S_CONTEXT" -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
+   kubectl --context "$K3S_CONTEXT" -n argocd rollout status deployment/argocd-repo-server --timeout=300s
+   ```
+
+   Keep the Argo CD API private; no ingress or public access is added. The upstream
+   installation includes auxiliary components, not just the reconciler.
+   For an existing installation, inspect conflicts first; never force ownership
+   of unrelated Argo CD resources. Bootstrap is not managed by this Application.
+
+2. Create `platform-lab` and its two external Secrets using the existing
+   **Secrets and TLS** section. Preload all application artifacts below, plus the
+   approved sample image. Ensure PostgreSQL can pull `postgres:18.6`. The target
+   retains Traefik's `platform.localhost` ingress; without Traefik, use trusted
+   frontend TLS port-forwarding as above.
+
+3. Review the rendered bootstrap and target, then apply bootstrap **only after**
+   secrets and artifacts exist:
+
+   ```sh
+   kubectl kustomize "$ROOT/infra/gitops/bootstrap"
+   kubectl kustomize "$ROOT/infra/gitops/local-k3s"
+   kubectl --context "$K3S_CONTEXT" apply -k "$ROOT/infra/gitops/bootstrap"
+   kubectl --context "$K3S_CONTEXT" -n argocd get application platform-local -o yaml
+   ```
+
+   Bootstrap reuses the existing PVC definition and worker RBAC, filtering out
+   application resources. The Application starts reconciliation immediately.
+   For an existing manually applied deployment, back up first and review pending
+   operations: enabling this worker processes them. Do not alternate manual base
+   applies and GitOps applies. The target uses backend `Recreate` for coordinated
+   upgrades; **V7 still requires every old backend process to stop**, including any
+   outside Kubernetes. This does not make arbitrary migrations reversible.
+
+### Immutable artifacts and retention
+
+`infra/gitops/local-k3s/releases.json` records the actual build source commit,
+platform, manifest digest, image configuration digest, and archive SHA-256.
+The target selects the backend and baseline frontend by **manifest digest**, not
+a reusable tag. Both application pull policies remain `Never`.
+The two frontend variants differ only in public `/release.json`; both use the
+same source commit and are compatible with the same backend/schema. This is a
+controlled release/rollback fixture, not a claim of two independent product releases.
+
+Retain **both frontend archives and the fixed backend archive** outside Git in
+access-controlled artifact storage for the entire rollback window. Copy the
+recorded archives from the release producer, verify their SHA-256 against the
+catalog, and import on the K3s node:
+
+```sh
+# ARTIFACTS is an absolute directory outside the checkout containing the archives.
+sha256sum "$ARTIFACTS/platform-frontend-a.tar" "$ARTIFACTS/platform-frontend-b.tar" "$ARTIFACTS/platform-backend.tar"
+# Compare each checksum with releases.json before importing.
+sudo k3s ctr images import --digests "$ARTIFACTS/platform-frontend-a.tar"
+sudo k3s ctr images import --digests "$ARTIFACTS/platform-frontend-b.tar"
+sudo k3s ctr images import --digests "$ARTIFACTS/platform-backend.tar"
+sudo k3s ctr images ls
+```
+
+Ensure containerd has each **exact named digest reference** from the catalog.
+OCI imports with unnamed entries may create `import-…@sha256:…` names; alias that
+entry with `sudo k3s ctr images tag EXISTING_REFERENCE CATALOG_IMAGE_REFERENCE`
+without changing its digest. Verify the manifest/config digest before tagging.
+Import both frontend versions before the first deployment; do not rely on image
+cache retention or assume Docker's image store is K3s's store.
+
+Archives are not committed or published by CI. The catalog identifies artifacts,
+but a fresh node cannot deploy without an operator supplying them. Rebuilding
+may yield different digests; never pretend a rebuilt artifact matches an old
+release. To produce a new reviewed artifact set from a clean committed checkout:
+
+```sh
+SOURCE_REVISION="$(git -C "$ROOT" rev-parse HEAD)"
+test -z "$(git -C "$ROOT" status --porcelain)"
+docker buildx create --name platform-releases --driver docker-container
+for RELEASE in a b; do
+  docker buildx build --builder platform-releases --platform linux/amd64 \
+    --provenance=false --build-arg SOURCE_REVISION="$SOURCE_REVISION" \
+    --build-arg RELEASE_ID="gitops-$RELEASE" \
+    --output "type=oci,dest=$ARTIFACTS/platform-frontend-$RELEASE.tar" "$ROOT/frontend"
+done
+docker buildx build --builder platform-releases --platform linux/amd64 \
+  --provenance=false --output "type=oci,dest=$ARTIFACTS/platform-backend.tar" "$ROOT/backend"
+tar -xOf "$ARTIFACTS/platform-frontend-a.tar" index.json | jq .
+sha256sum "$ARTIFACTS/"*.tar
+```
+
+Record the index's single image manifest digest and that manifest's config
+digest, source revision and platform in a reviewed catalog update; update the
+target image references together. OCI identity is byte-precise; these builds
+are not claimed to be byte-for-byte reproducible. Do not garbage-collect the
+previous artifacts until their rollback window expires.
+
+### Git-driven frontend upgrade and rollback drill
+
+Start with the catalog's baseline frontend selected and Argo CD `Synced`,
+`Healthy`, and latest operation `Succeeded`. Do not change backend, PostgreSQL,
+configuration, secrets, PVC, or Flyway during this drill.
+
+1. Create an environment through the authenticated API and wait for `READY`.
+   Retain it as a persistence fixture; record its environment ID and operation
+   history. Do not delete it while the drill runs.
+2. In one terminal, start the opt-in test using the existing trusted HTTPS
+   endpoint and a configured OPERATOR account:
+
+   ```sh
+   export PLATFORM_K3S_CONTEXT="$K3S_CONTEXT"
+   export PLATFORM_K3S_API_URL=https://platform.localhost:8443
+   export PLATFORM_K3S_CA_FILE="$TLS_DIR/tls.crt"
+   export PLATFORM_K3S_OPERATOR_USERNAME=your-configured-operator
+   read -r -s -p 'Operator plaintext password: ' PLATFORM_K3S_OPERATOR_PASSWORD; echo
+   export PLATFORM_K3S_OPERATOR_PASSWORD
+   export PLATFORM_GITOPS_ENVIRONMENT_ID=your-ready-environment-uuid
+   export PLATFORM_GITOPS_EVIDENCE=/tmp/platform-gitops-evidence.json
+   PLATFORM_GITOPS_TEST=true python3 -m unittest discover \
+     -s "$ROOT/automation/tests" -p test_gitops.py -v
+   unset PLATFORM_K3S_OPERATOR_PASSWORD
+   ```
+
+3. Wait for the test to print `Waiting for Git reconciliation of gitops-b`.
+   Change **only** the frontend digest in the target Kustomization to the
+   catalog's second frontend manifest digest. Commit/review/publish that change
+   through the normal repository workflow on the Application's watched branch.
+   Argo CD must reconcile the new Git commit; inspect its status and frontend
+   rollout. The test waits up to 20 minutes per phase.
+4. When the test prints `Waiting for Git reconciliation of gitops-a`, create and
+   publish a **new revert commit** for that frontend-only release change.
+   Do not reset history, change the Application revision, run `rollout undo`,
+   or manually patch the Deployment. Wait for Git reconciliation and the test.
+5. A passing evidence file records three distinct synchronized Git commits,
+   exact desired/runtime frontend digests and served release identities.
+   Assertions require unchanged backend/PostgreSQL specs, Deployment/pod UIDs
+   and restart counts, Flyway history, PVC and Secret UIDs, and authenticated
+   environment/operation history, with backend database readiness `UP`.
+   It records only a hash of fixture state, not credentials or API contents.
+   Archive the evidence externally with the reviewed release commits.
+   Clean up the fixture **through the API**, not by deleting namespaces.
+
+Failure or interruption does not trigger destructive cleanup or an automatic
+rollback. Inspect Argo CD conditions, pod events, artifact availability and
+readiness. Fix the Git change or publish its reviewed revert. A retained frontend
+artifact cannot repair a database migration. Database restore is a separate,
+backup-dependent procedure; it remains unvalidated here.
+
+### Validation status
+
+The offline GitOps contract tests render both targets and check ownership,
+non-pruning behavior, permissions and pinning. Run with existing unittest
+discovery; the live drill is skipped unless explicitly enabled. Controller
+installation rendering requires access to the commit-pinned upstream URL.
+
+**2026-10-17:** a disposable K3s v1.35.1+k3s1 node was started for validation,
+and the pinned CRDs and namespace-scoped Argo CD resources applied successfully.
+Controller startup was blocked by image downloads from `cdn01.quay.io`
+(`ErrImagePull`, DNS failure). **No successful Git synchronization,
+frontend upgrade/revert, or persistence proof is claimed.** A target-cluster
+operator must complete the drill and retain its evidence before marking the
+roadmap acceptance boundary complete. Registry publication, multi-node artifact
+distribution, backend/schema rollback, backup recovery and production readiness
+remain excluded.
