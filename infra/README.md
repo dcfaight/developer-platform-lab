@@ -628,13 +628,215 @@ backup recovery.
   useful defaults, not validated production hardening.
 - A separate [disposable logical backup/restore drill](#disposable-k3s-logical-backuprestore)
   is available; it does not test the live PVC or restart persistence.
-- **Open operational work:** retain logical-restore evidence and test live
-  restart persistence on K3s; run the automated authenticated lifecycle check
+- **Open operational work:** retain logical-restore evidence and execute the
+  [restart-persistence gate](#disposable-k3s-restart-persistence); run the automated
+  authenticated lifecycle check
   separately from the recorded manual validation; review network policies,
   database role separation, secret encryption/rotation, certificate renewal,
   and access. Gate status is maintained in the
   [current roadmap](../docs/operating-model-and-sequence.md). No expiration
   scheduler or cleanup-CLI TLS extension is included.
+
+## Disposable K3s restart persistence
+
+**PERSIST-01 — defined, live result/evidence pending.** This is the next focused
+validation increment after the GitOps gate, not evidence that GitOps has passed.
+The recorded manual lifecycle check, frontend-only GitOps drill, backend restart
+tests, and logical restore fixture do not prove K3s same-PVC restart persistence.
+No successful run of this drill is recorded.
+
+### Scope and explicit opt-in
+
+This manual, operator-invoked drill uses the **existing application database**
+on a dedicated disposable **single-node K3s** target. It gracefully replaces the
+PostgreSQL pod, waits for recovery, then gracefully replaces the backend pod.
+Keep the same PVC/PV, node, images, schema, Secrets, and configuration throughout.
+It tests committed state across controlled pod restarts, not in-flight crash
+recovery, host/K3s-service restart, node loss, backup recovery, PITR, HA, failover,
+or production readiness. Temporary API unavailability is allowed and must be timed.
+
+Use Bash, kubectl, curl, `jq`, and the worker-enabled deployment and trusted TLS
+setup above. The operator needs Kubernetes permissions to read nodes/PVs/PVCs,
+Deployments/pods, exec the private backend health probe, and delete the selected
+platform pods, plus the configured API `OPERATOR` account. Confirm nodes, storage,
+image availability, and platform readiness first. Inspect existing pending
+work/leftovers; do not interrupt unrelated work.
+Quiesce other API writers and cleanup invocations so fixture comparisons are
+meaningful. If GitOps manages the target, record its synchronized revision and
+keep desired state fixed; do not alternate manual base applies with GitOps, change
+Deployment templates, or weaken controller ownership/pruning restrictions.
+The drill deletes only explicitly selected platform **pods**, never storage or
+environment namespaces. Do not run it against a shared/production context.
+
+Choose an absolute access-controlled evidence directory outside the checkout on
+operator-managed storage. A `/tmp` directory or task artifact alone is not durable;
+copy and verify the evidence before the host/task expires. Do not enable shell
+tracing, record passwords/Authorization headers, or export Secrets/kubeconfig.
+
+```sh
+ROOT=/home/runner/work/developer-platform-lab/developer-platform-lab
+export K3S_CONTEXT=your-disposable-k3s-context
+read -r -p 'Type the disposable context to authorize pod restarts: ' CONFIRM_CONTEXT
+test -n "$K3S_CONTEXT" && test "$CONFIRM_CONTEXT" = "$K3S_CONTEXT" || exit 1
+read -r -p 'Absolute evidence directory outside the checkout: ' EVIDENCE
+test "${EVIDENCE:0:1}" = / || exit 1
+umask 077
+mkdir -p "$EVIDENCE"
+chmod 700 "$EVIDENCE"
+git -C "$ROOT" rev-parse HEAD > "$EVIDENCE/checkout-revision.txt"
+kubectl --context "$K3S_CONTEXT" get nodes -o wide > "$EVIDENCE/nodes.txt"
+```
+
+Review the selected target before continuing; confirmation is a manual safety
+step, not an automated cluster-identity check. Record UTC date, context/cluster
+identity, node/K3s version, deployment source (manual or GitOps revision), desired
+images/runtime image IDs, operator identity (no credentials), and chosen timeouts.
+Use a stable ingress or frontend TLS port-forward that will survive backend and
+database pod replacement. The examples below use the ingress variables from the
+manual lifecycle sequence (`K3S_HOST`, `K3S_NODE_IP`, `TLS_DIR`,
+`OPERATOR_USERNAME`); curl prompts for the configured operator's plaintext password.
+Do not use `--insecure`, redirects, or plaintext remote HTTP.
+
+### Fixture, restart, and lifecycle sequence
+
+1. Using the [manual lifecycle sequence](#recorded-lifecycle-validation--2026-10-16)
+   and [API contract](../docs/api.md), create **two new drill-owned environments**
+   with distinct run-specific idempotency keys. Keep one `READY` (`ENV_ID`);
+   fully delete the other through the API (`HISTORY_ENV_ID`), waiting for
+   `DELETED`, successful delete operation, and namespace `NotFound`.
+   Do not reuse the historical example IDs. Retain each exact POST JSON, key,
+   caller/team scope, HTTP `202` body and `Location`, and all returned IDs.
+   Generate each key once and save it; do not regenerate the manual example's
+   timestamp/random key when replaying.
+   The ready fixture has one successful create operation; the deleted fixture
+   has successful create and delete operations.
+
+   Before restarting, replay the ready fixture's exact POST with the same key
+   and caller/team: require the original `202` body/IDs/accepted states and
+   `Location`, not current `READY` state. Also submit a different valid name with
+   that key: require `409 IDEMPOTENCY_CONFLICT`. Save both request bodies and
+   responses. The conflict is expected; omit curl's `--fail` for that check,
+   capture its HTTP status explicitly, and do not treat arbitrary errors as success.
+
+2. Capture a stable **before** snapshot after both fixtures are terminal.
+   Save ready/deleted environment detail and complete operation history/events.
+   For these new fixtures, one page of 100 is sufficient; verify `totalElements`
+   is respectively 1 and 2 and `totalPages` is 1. Do not silently truncate history.
+   Run this block again with `PHASE=after-postgres` and `PHASE=after-backend`
+   after the respective recovery, before new lifecycle mutations:
+
+   ```sh
+   PHASE=before
+   for ID in "$ENV_ID" "$HISTORY_ENV_ID"; do
+     curl --silent --show-error --fail --connect-timeout 5 --max-time 30 \
+       --noproxy '*' --cacert "$TLS_DIR/tls.crt" \
+       --resolve "$K3S_HOST:443:$K3S_NODE_IP" -u "$OPERATOR_USERNAME" \
+       "https://$K3S_HOST/api/v1/environments/$ID" \
+       -o "$EVIDENCE/$PHASE-$ID-environment.json"
+     curl --silent --show-error --fail --connect-timeout 5 --max-time 30 \
+       --noproxy '*' --cacert "$TLS_DIR/tls.crt" \
+       --resolve "$K3S_HOST:443:$K3S_NODE_IP" -u "$OPERATOR_USERNAME" \
+       "https://$K3S_HOST/api/v1/environments/$ID/operations?page=0&size=100" \
+       -o "$EVIDENCE/$PHASE-$ID-history.json"
+   done
+   kubectl --context "$K3S_CONTEXT" -n platform-lab get pods \
+     -l 'app in (postgres,backend)' -o json |
+     jq '[.items[] | {name: .metadata.name, uid: .metadata.uid,
+       node: .spec.nodeName, images: [.spec.containers[].image],
+       containers: .status.containerStatuses}]' > "$EVIDENCE/$PHASE-pods.json"
+   kubectl --context "$K3S_CONTEXT" -n platform-lab get pvc postgres-data -o json \
+     > "$EVIDENCE/$PHASE-pvc.json"
+   PV="$(jq -r '.spec.volumeName' "$EVIDENCE/before-pvc.json")"
+   kubectl --context "$K3S_CONTEXT" get pv "$PV" -o json > "$EVIDENCE/$PHASE-pv.json"
+   kubectl --context "$K3S_CONTEXT" -n platform-lab exec deployment/backend -- \
+     curl --fail --silent --show-error --max-time 10 \
+       http://127.0.0.1:8080/actuator/health/readiness \
+     > "$EVIDENCE/$PHASE-readiness.json"
+   ```
+
+   Check every command's exit status and JSON content before continuing; a
+   partial/empty snapshot is not evidence. Require aggregate readiness `UP`
+   (its configured group includes `db`; component details are hidden), PVC
+   `Bound`, and the expected ready sample Deployment/pods.
+   Retain those sample observations and the deleted namespace's `NotFound`.
+
+3. Select the single current PostgreSQL pod by `app=postgres`; inspect its name,
+   UID, node, and `postgres-data` mount against the baseline. Require exactly one
+   ready pod, then run **one component at a time**:
+
+   ```sh
+   POSTGRES_POD="$(kubectl --context "$K3S_CONTEXT" -n platform-lab get pod \
+     -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+   date -u +%FT%TZ > "$EVIDENCE/postgres-restart-start.txt"
+   kubectl --context "$K3S_CONTEXT" -n platform-lab delete pod "$POSTGRES_POD" \
+     --wait=true --timeout=180s > "$EVIDENCE/postgres-restart.txt"
+   kubectl --context "$K3S_CONTEXT" -n platform-lab rollout status deployment/postgres \
+     --timeout=300s >> "$EVIDENCE/postgres-restart.txt"
+   kubectl --context "$K3S_CONTEXT" -n platform-lab rollout status deployment/backend \
+     --timeout=300s >> "$EVIDENCE/postgres-restart.txt"
+   ```
+
+   Do not force deletion, shorten grace periods, scale/reset the database, or
+   delete/recreate the PVC/PV/platform namespace. Require a **new pod UID**, the
+   same node and same PVC UID/PV name/PV UID, a bound volume, database readiness
+   `UP`, and authenticated API recovery within the recorded bounded wait.
+   A rollout command alone can race replacement and report an old state:
+   verify the new UID and ready container explicitly before taking the
+   `after-postgres` snapshot. Record unexpected backend restarts, if any.
+   Repeat the accepted replay and conflict probes from step 1 and save results.
+   Record the recovery-end UTC timestamp only after readiness and authenticated
+   API recovery are verified, not merely after `rollout status` exits.
+
+4. Repeat step 3 for the single `app=backend` pod, using `BACKEND_POD`, a
+   `backend-restart` log/timestamps, and `rollout status deployment/backend
+   --timeout=300s`. Wait for a new ready backend UID, database readiness `UP`,
+   and authenticated API recovery; capture `after-backend` and repeat both replay
+   probes. Do not restart PostgreSQL again or change images/schema/configuration.
+   For **each** after snapshot, compare both fixtures' JSON with the baseline
+   (for example, `diff -u <(jq -S . BEFORE_FILE) <(jq -S . AFTER_FILE)`).
+   Require unchanged IDs, ownership, expiry, terminal states, operation counts,
+   timestamps, correlation IDs, attempts, and ordered events. Ignore only
+   request-specific HTTP headers such as `Date`/`X-Request-Id`, not lost history.
+   Replays must add no environment or operation and must preserve `Location`.
+
+5. After both comparisons pass, create a **fresh** environment with a new key.
+   Observe successful create operation, `READY`, owned namespace, and
+   `sample-service` Deployment/pod readiness; API acceptance alone is insufficient.
+   Delete both this new environment and the retained ready fixture **through the
+   authenticated API**. Poll operation/detail/history until delete `SUCCEEDED`,
+   environment `DELETED`, and each namespace is `NotFound` (not an auth/network
+   error). Retain create/delete operation IDs, events, and final API history,
+   including the unchanged pre-restart create events. Confirm the pre-deleted
+   fixture is still deleted and its history unchanged. Do not retry an ambiguous
+   DELETE blindly; recover its operation via authenticated detail/history reads.
+   Never delete environment namespaces directly or strip finalizers.
+
+### Required retained evidence and gate closure
+
+Archive the metadata, exact fixture requests/keys/scopes and acceptance responses,
+before/after snapshots for **both restart phases**, replay/conflict HTTP statuses,
+bodies and `Location` comparisons, restart commands/UTC timings, readiness and
+post-restart lifecycle/namespace-absence results. Include an explicit pass/fail/
+unknown checklist for every requirement and an operator statement listing all
+interventions: **no manual SQL/data repair, Flyway repair, restore/reseed,
+storage replacement, or PVC/PV loss** is allowed for a pass. Normal automatic
+PostgreSQL startup recovery on the existing volume is within scope.
+
+On any timeout, lost/mutated history, changed storage identity, replay mismatch,
+repair requirement, or lifecycle failure, stop and retain a failed/blocked
+result plus sanitized diagnostics and leftovers. Do not repair state and relabel
+that attempt as passing. Only clean up drill-owned environments through the API
+when their state permits; retain failures for diagnosis. Destructive cluster
+teardown is separate and must wait until evidence is archived.
+
+Retain a checksum manifest alongside the sanitized evidence in access-controlled
+operator-managed storage **outside the task environment**, verify the archived
+copy, and record its durable reference. Then update **PERSIST-01** in the
+[canonical roadmap](../docs/operating-model-and-sequence.md#current-delivery-gates)
+with target, UTC date, checkout/deployed revisions, exact checks, outcome,
+interventions, and evidence reference (or blocker/next action). A merge, an
+unretained task-local run, or a passing lifecycle/restore test does not close this
+gate, the capacity baseline, or any production recovery/readiness gate.
 
 ## Disposable K3s logical backup/restore
 
