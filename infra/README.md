@@ -777,6 +777,13 @@ remains open; this drill does not resolve it.
 
 ### Scope and controller decision
 
+**Tooling exists; successful live validation is still required.** The next
+roadmap gate is a retained successful run on the disposable K3s target, proving
+Git synchronization, frontend upgrade and Git-driven revert with unchanged
+backend and persisted state. The recorded image-download/DNS failure below
+remains an open blocker; bootstrap and offline checks do not close
+[GITOPS-01](../docs/operating-model-and-sequence.md#current-delivery-gates).
+
 This opt-in path reuses the platform Kustomize package through
 `infra/gitops/local-k3s`. Argo CD **v3.5.5** is selected for this bounded increment:
 it reconciles the existing Kustomize target and exposes the synchronized Git
@@ -788,9 +795,10 @@ this is not a comprehensive container vulnerability audit.
 
 The Application watches this repository's **`main` branch**, specifically
 `infra/gitops/local-k3s`. Git is authoritative; changing a digest in that path
-is a release, and a new commit reverting that change is rollback. Before these
-files merge, an operator may explicitly select the reviewed feature branch in
-the bootstrap Application; record that selection and restore `main` after merge.
+is a release, and a new commit reverting that change is rollback. For a reviewed
+disposable-target drill on a feature branch, an operator may explicitly select
+that branch in the bootstrap Application before the baseline; record the
+selection, keep it fixed through all three phases, and restore `main` afterward.
 Do not use out-of-Git Application image overrides or `kubectl set image`.
 There is one local target, not dev/QA/UAT promotion or production continuity.
 
@@ -947,13 +955,29 @@ Start with the catalog's baseline frontend selected and Argo CD `Synced`,
 `Healthy`, and latest operation `Succeeded`. Do not change backend, PostgreSQL,
 configuration, secrets, PVC, or Flyway during this drill.
 
+Before starting, complete bootstrap in the order above, verify the controller
+and repo-server rollouts, and verify/import all three exact catalog artifacts.
+Run the existing checks without enabling the live drill:
+
+```sh
+PLATFORM_GITOPS_ARTIFACTS="$ARTIFACTS" \
+  PLATFORM_GITOPS_ACCESS_TEST=true PLATFORM_K3S_CONTEXT="$K3S_CONTEXT" \
+  python3 -m unittest discover -s "$ROOT/automation/tests" -p test_gitops.py -v
+```
+
+Leave `PLATFORM_GITOPS_TEST` unset for this preflight; archive verification and
+RBAC checks are prerequisites, not sync/upgrade/revert proof. Choose an
+access-controlled durable evidence destination before running. Use a fresh
+absolute directory under `/tmp`, outside the checkout, for each attempt so an
+old `PASS` file cannot be mistaken for a new result.
+
 1. Create an environment through the authenticated API and wait for `READY`.
    Retain it as a persistence fixture; record its environment ID and operation
    history. Do not delete it while the drill runs.
-2. In one terminal, start the opt-in test using the existing trusted HTTPS
-   endpoint and a configured OPERATOR account:
+2. In one Bash terminal, start the opt-in test using the existing trusted HTTPS
+   endpoint and a configured OPERATOR account (do not enable shell tracing):
 
-   ```sh
+   ```bash
    export PLATFORM_K3S_CONTEXT="$K3S_CONTEXT"
    export PLATFORM_K3S_API_URL=https://platform.localhost:8443
    export PLATFORM_K3S_CA_FILE="$TLS_DIR/tls.crt"
@@ -961,10 +985,13 @@ configuration, secrets, PVC, or Flyway during this drill.
    read -r -s -p 'Operator plaintext password: ' PLATFORM_K3S_OPERATOR_PASSWORD; echo
    export PLATFORM_K3S_OPERATOR_PASSWORD
    export PLATFORM_GITOPS_ENVIRONMENT_ID=your-ready-environment-uuid
-   export PLATFORM_GITOPS_EVIDENCE=/tmp/platform-gitops-evidence.json
+   GITOPS_RUN_DIR="$(mktemp -d /tmp/platform-gitops.XXXXXX)"
+   export PLATFORM_GITOPS_EVIDENCE="$GITOPS_RUN_DIR/evidence.json"
    PLATFORM_GITOPS_TEST=true python3 -m unittest discover \
-     -s "$ROOT/automation/tests" -p test_gitops.py -v
+     -s "$ROOT/automation/tests" -p test_gitops.py -v 2>&1 | tee "$GITOPS_RUN_DIR/test.log"
+   GITOPS_TEST_STATUS=${PIPESTATUS[0]}
    unset PLATFORM_K3S_OPERATOR_PASSWORD
+   test "$GITOPS_TEST_STATUS" -eq 0
    ```
 
 3. Wait for the test to print `Waiting for Git reconciliation of gitops-b`.
@@ -983,7 +1010,21 @@ configuration, secrets, PVC, or Flyway during this drill.
    and restart counts, Flyway history, PVC and Secret UIDs, and authenticated
    environment/operation history, with backend database readiness `UP`.
    It records only a hash of fixture state, not credentials or API contents.
-   Archive the evidence externally with the reviewed release commits.
+   The JSON is written **only after all three phases pass**. Require both a
+   zero test exit status and a fresh `result: PASS` file from this attempt;
+   skipped tests, partial phases, or an old evidence file are not success.
+   Archive `evidence.json` and `test.log` externally with the release catalog,
+   references to the three reviewed release commits, and the retained OCI
+   archives/checksums from the artifact procedure above. Include a sanitized
+   run record with UTC date, target/context, Application source/branch,
+   checked-out test revision, fixture environment/operation IDs, command,
+   outcome and durable artifact location. The JSON records the checked
+   invariants and a state hash, not raw before/after state or API responses;
+   retain the test log with it to make the comparison outcome explicit.
+   Verify the bundle is readable from the durable destination before removing
+   task-local files, then update GITOPS-01 in the canonical roadmap with its
+   sanitized evidence reference. Never archive credentials, kubeconfig, Secret
+   contents or unsanitized diagnostic output. `/tmp` alone is not retention.
    Clean up the fixture **through the API**, not by deleting namespaces.
 
 Failure or interruption does not trigger destructive cleanup or an automatic
@@ -991,6 +1032,16 @@ rollback. Inspect Argo CD conditions, pod events, artifact availability and
 readiness. Fix the Git change or publish its reviewed revert. A retained frontend
 artifact cannot repair a database migration. Database restore is a separate,
 backup-dependent procedure; it remains unvalidated here.
+
+If controller startup, image pulls, DNS, or any phase fails, retain the test log
+and sanitized Application conditions/pod events as a **blocked/failed attempt**,
+with target, revision, UTC date, blocker and next action. The test does not
+write failure evidence JSON. Do not claim the gate complete or remove the
+historical blocker based on bootstrap, artifact imports, or RBAC checks alone.
+Resolve image/DNS availability without weakening TLS, ownership or permissions,
+then repeat the entire baseline → upgrade → revert drill in a fresh run directory.
+This checks state preservation during frontend reconciliation, not persistence
+across a backend/database restart or production recovery.
 
 ### Validation status
 
