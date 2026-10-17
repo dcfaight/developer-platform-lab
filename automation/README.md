@@ -5,6 +5,13 @@ deletion through the **same backend API** as the portal. It never accesses SQL o
 Kubernetes. TTL timestamps alone do not start a daemon: cleanup happens only when
 an operator invokes this CLI. No scheduler/CronJob is installed.
 
+`backup_restore.py` is a separate, explicitly opt-in disposable K3s logical
+backup/restore workflow. It never connects to the live application database or
+uses its PVC. See the [operator runbook](../infra/README.md#disposable-k3s-logical-backuprestore)
+for safety gates, image preparation, evidence retention and limitations.
+Its offline safety tests run in normal unittest discovery; the live test is
+skipped unless `PLATFORM_BACKUP_RESTORE_TEST=true`.
+
 ## Manual use
 
 Start the matching backend from this revision using the

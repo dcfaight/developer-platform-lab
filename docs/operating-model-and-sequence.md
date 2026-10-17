@@ -48,6 +48,9 @@ The next delivery sequence is:
    implemented; target-cluster synchronization and rollback evidence remain
    required. See the [GitOps runbook](../infra/README.md#disposable-k3s-gitops-deployment-and-frontend-rollback).
 3. Validate backup and restore, including recovery evidence.
+   An opt-in [disposable K3s logical round-trip drill](../infra/README.md#disposable-k3s-logical-backuprestore)
+   is implemented; a successful run and retained evidence remain required.
+   This is not PITR, HA, or production recovery validation.
 4. Measure capacity with explicit workload and concurrency targets.
 
 Nightly CI is supporting backlog automation, not a substitute for these
