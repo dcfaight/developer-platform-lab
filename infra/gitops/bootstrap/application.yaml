@@ -5,7 +5,7 @@ metadata:
   namespace: argocd
 spec:
   sourceRepos:
-    - https://github.com/dcfaight/developer-platform-lab.git
+    - https://github.com/dcfaight/internal-developer-platform.git
   destinations:
     - server: https://kubernetes.default.svc
       namespace: platform-lab
@@ -28,7 +28,7 @@ metadata:
 spec:
   project: platform-local
   source:
-    repoURL: https://github.com/dcfaight/developer-platform-lab.git
+    repoURL: https://github.com/dcfaight/internal-developer-platform.git
     targetRevision: main
     path: infra/gitops/local-k3s
   destination:

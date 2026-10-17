@@ -213,7 +213,7 @@ class GitOpsRollbackTests(unittest.TestCase):
         application = self.resource("application", "platform-local", "argocd")
         spec = application["spec"]
         self.assertEqual("infra/gitops/local-k3s", spec["source"]["path"])
-        self.assertEqual("https://github.com/dcfaight/developer-platform-lab.git",
+        self.assertEqual("https://github.com/dcfaight/internal-developer-platform.git",
                          spec["source"]["repoURL"])
         self.assertNotIn("kustomize", spec["source"], "No out-of-Git image overrides allowed")
         status = application.get("status", {})
@@ -324,7 +324,7 @@ class GitOpsObservationTests(unittest.TestCase):
         self.revision = "b" * 40
         self.application = {
             "spec": {"source": {
-                "repoURL": "https://github.com/dcfaight/developer-platform-lab.git",
+                "repoURL": "https://github.com/dcfaight/internal-developer-platform.git",
                 "path": "infra/gitops/local-k3s", "targetRevision": "main"}},
             "status": {
                 "sync": {"status": "Synced", "revision": self.revision},
