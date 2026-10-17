@@ -14,6 +14,11 @@ Confirm its context and API server match the intended disposable target in the
 infrastructure runbook; do not rely on the display name alone. Keep kubeconfigs
 and credentials local and out of screenshots or follow-up notes.
 
+For connection failures or an unexpectedly empty pod view, use the separate
+[FreeLens setup and recovery runbook](freelens-setup-recovery.md). Its credential
+maintenance steps require an administrator and are not part of this read-only
+checklist.
+
 Use list/detail views, logs, and events only. Do not edit, scale, restart, delete,
 open pod shells, or change access permissions for this check. If a view is
 unavailable under your current permissions, note it rather than widening access.

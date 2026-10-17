@@ -32,6 +32,7 @@ and its proposed execution sequence.
 | Local request → provision → observe → delete walkthrough | [Demo and troubleshooting](docs/demo.md) |
 | kind, Compose, K3s, GitOps, and operational drill instructions/evidence | [Infrastructure guide](infra/README.md) |
 | Optional read-only visual cluster checks | [FreeLens operator checklist](docs/runbooks/freelens-operator-checklist.md) |
+| Windows FreeLens / Linux K3s connection recovery and token choices | [FreeLens setup and recovery](docs/runbooks/freelens-setup-recovery.md) |
 | Cleanup, logical restore, and capacity tooling | [Automation guide](automation/README.md) |
 | API contract | [API reference](docs/api.md) |
 | Accepted architecture decisions | [Decision records](docs/decisions/) |
