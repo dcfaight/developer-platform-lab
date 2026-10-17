@@ -623,9 +623,12 @@ docker compose config --quiet
 The Compose check requires the configured password in `.env`.
 On Windows use `mvnw.cmd` in place of `./mvnw`.
 Stop PostgreSQL with `docker compose down`; data persists in a named volume.
-Backend and PostgreSQL restarts preserve environments, operations, audit
-history, and idempotency reservations. Replaying a key after restart returns
+In this local Compose/host-run workflow, backend and PostgreSQL restarts preserve
+environments, operations, audit history, and idempotency reservations. Replaying a key after restart returns
 the original accepted response without additional writes.
+K3s restart persistence requires the separate opt-in
+[same-PVC validation gate](infra/README.md#disposable-k3s-restart-persistence);
+no passing K3s restart result is recorded.
 Use `docker compose down --volumes` only when intentionally discarding local data.
 
 ## 15. Testing Strategy

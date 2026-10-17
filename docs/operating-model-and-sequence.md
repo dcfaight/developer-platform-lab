@@ -1,9 +1,8 @@
 # Operating Model and Delivery Sequence
 
 **Canonical current status and roadmap.** Last reviewed October 17, 2026,
-against `main` at `820f7463d8834866ba4901cb355bf973ec9505f7` (after PR #28
-merged). Update this document when implementation or validation evidence
-changes; README and runbooks provide entry points and execution details, not
+for the post-PR #29 validation sequence. Update this document when implementation
+or validation evidence changes; README and runbooks provide entry points and execution details, not
 competing status matrices.
 
 ## Operating model
@@ -32,9 +31,11 @@ ephemeral task environment; it does not mean the artifact is durably retained.
 
 ## Current delivery gates
 
-This is the durable roadmap record after PR #28, not a claim of new validation.
+This is the durable roadmap record after PR #29, not a claim of new validation.
 The next priorities are **GITOPS-01 → PERSIST-01 → CAPACITY-01 → ARCH-01**;
-the other open acceptance gates remain recorded here. “Evidence pending” means
+the GitOps gate/runbook is defined, and **PERSIST-01 is the next focused
+validation increment after GitOps**, not a claim that GitOps live evidence is complete.
+The other open acceptance gates remain recorded here. “Evidence pending” means
 validation or durable retention is still required; no recorded blocker does not
 mean a target has been verified healthy.
 
@@ -46,7 +47,7 @@ mean a target has been verified healthy.
 | **GITOPS-01 — GitOps live validation** | Implemented; evidence pending; blocked by `cdn01.quay.io` DNS/image-download failure. | Bounded Argo CD tooling for frontend-only reconciliation and rollback is implemented; target ownership excludes the namespace, PVC, worker RBAC, and external secrets. | Proves target-cluster Git synchronization and frontend upgrade/revert without disturbing backend or persisted state. October 17, 2026: bootstrap resources applied, but Argo controller startup was blocked by the image-download failure. No successful Git sync, frontend upgrade/revert, or persistence proof is recorded. | Resolve artifact/image availability without weakening TLS or permissions. Retain successful evidence for three distinct Git commits (baseline, frontend upgrade, revert), exact desired/runtime releases, and unchanged backend/database/PVC/secret and environment/operation state. | [GitOps runbook and validation status](../infra/README.md#disposable-k3s-gitops-deployment-and-frontend-rollback) |
 | **RESTORE-01 — Logical database round trip** | Implemented; durable evidence pending. No blocker recorded. | Opt-in disposable K3s fixture-based logical backup/restore tooling is implemented; it uses isolated temporary databases, not the live application database or PVC. | October 17, 2026: task-local disposable K3s round trip passed fixture, Flyway, schema, and sequence checks; backup took 0.207 s and restore 0.216 s. The artifacts were only in that task environment. | Retain the dump, checksum, and evidence durably for the intended disposable target, or repeat the drill and archive them. This is not live PVC backup, restart persistence, node-loss recovery, PITR, HA, or production recovery. | [Logical backup/restore runbook and limits](../infra/README.md#disposable-k3s-logical-backuprestore) |
 | **CAPACITY-01 — Lifecycle baseline** | Implemented; evidence pending. No blocker recorded. | PR #26 implemented `capacity_baseline.py`, an opt-in harness for 10 fixed `sample-service` lifecycle workflows at concurrency 2, including cleanup, plus offline tests and optional resource samples. | Proves bounded lifecycle timing, failure, and cleanup behavior on the selected target. Harness/offline tests are implementation evidence; no successful live capacity-baseline run is recorded. Per-environment quotas are guardrails, not capacity estimates. | Retain one successful full run with selected target/configuration, timings, failures, cleanup outcomes, and explicit resource-sampling availability. It is a small baseline, not support for 3,000 developers, saturation, or autoscaling evidence. | [Capacity harness and interpretation](../automation/README.md#opt-in-lifecycle-capacity-baseline); [resource budgets](../infra/README.md#provisioned-environment-resource-budgets) |
-| **PERSIST-01 — Restart persistence on K3s** | Evidence pending; controlled check still needs definition. No live-run blocker recorded. | PostgreSQL uses a persistent K3s PVC; the documented restore fixture is separate and does not exercise it. | Proves environment/operation IDs, history, and idempotent replay survive restart without manual data repair. Persistence across a controlled K3s pod restart has not been demonstrated in the recorded evidence. | Define and run a controlled disposable-target check that retains known environment/operation/idempotency/history records across a PostgreSQL restart; retain before/after observations, replay, readiness, and subsequent safe deletion/namespace-absence evidence. Do not delete the PVC or platform namespace as a test. | [K3s persistence and teardown cautions](../infra/README.md#persistence-startup-and-remaining-work) |
+| **PERSIST-01 — Restart persistence on K3s** | Gate/runbook defined; live validation and retained evidence pending. No live-run blocker recorded. | Opt-in manual drill gracefully replaces PostgreSQL and then backend pods on a dedicated disposable single-node K3s target, retaining the same bound PVC/PV and fixed images/configuration. | Must prove known environment/operation IDs, terminal history/events, and accepted replay/conflict behavior survive both restarts, with database readiness recovered and no manual database repair. No passing K3s restart result is recorded; prior lifecycle, GitOps, and logical-restore checks do not close this gate. | Retain before/after API and storage/pod observations, restart commands/timings, original requests/keys and replay comparisons, post-restart create → `READY` → delete → namespace absence, and a no-repair/no-PVC-loss record. Close only with a passing run archived outside the task environment and a dated target/revision/outcome/evidence reference here. No PVC/namespace deletion, backup recovery, HA, node loss, failover, or PITR is tested. | [Restart-persistence drill and evidence contract](../infra/README.md#disposable-k3s-restart-persistence) |
 | **CLEANUP-01 — Expiration cleanup** | Implemented; acceptance reconciliation pending. Historical limits remain in the linked evidence. | A manual API-driven cleanup CLI is implemented; it defaults to dry-run and never deletes namespaces directly. Scheduling and remote-TLS transport are deferred. | The cleanup README preserves the original change's hosted-CI, review/security, kind, and browser verification limits. Those dated results are historical and have not been reconciled here as new failures. | Reconcile the recorded gates against current hosted CI/review and produce a successful disposable kind/browser cleanup walkthrough before treating that acceptance as closed. Do not weaken safeguards to make a drill pass. | [Cleanup usage and original evidence](../automation/README.md#evidence-and-remaining-gates-for-the-original-cleanup-change); [demo](demo.md#5-manual-expiration-cleanup) |
 | **ARCH-01 — Architecture and recovery decisions** | Planned/deferred; ownership, isolation, and recovery objectives remain unresolved. | Phase B records the intended topology, not deployed production sites. Hosting/control-plane ownership, management placement/isolation, recovery objectives, `prod1`/`prod2` implementation, identity/account-management hardening, and deeper security/recovery work remain open. | Establishes agreed design boundaries and measurable acceptance criteria, not production readiness. No broader recovery/security validation is claimed. | Record decisions/ADRs with acceptance criteria and implementation dependencies; explicitly resolve or defer SSO/OIDC, network policy, secret rotation, database role separation, retention, PITR, HA, and failover. | [Phase B decision](decisions/phase-b-target-architecture.md); [open decisions and deferred scope](#open-decisions-and-deferred-scope) |
 
@@ -58,7 +59,7 @@ production changes:
 1. Select a healthy disposable target, verify image/artifact availability, and
    choose an operator-managed durable evidence location. Do not weaken TLS,
    access controls, or ownership checks.
-2. Complete **GITOPS-01**, the next focused implementation/validation increment,
+2. Complete the preceding **GITOPS-01** live-evidence gate,
    using the [live drill and evidence handoff](../infra/README.md#git-driven-frontend-upgrade-and-rollback-drill):
    - Resolve the recorded `cdn01.quay.io` DNS/image-download blocker and verify
      controller startup and exact artifact availability on the disposable K3s
@@ -76,8 +77,14 @@ production changes:
      outside the task environment, alongside the rollback artifacts. Record
      target, date, checked-out revision, outcome and sanitized durable evidence
      reference in this roadmap. Until then, the gate remains open.
-3. Define and validate controlled same-PVC restart persistence with retained
-   before/after evidence.
+3. Run **PERSIST-01**, the next focused validation increment after GitOps, using
+   the [opt-in same-PVC restart drill](../infra/README.md#disposable-k3s-restart-persistence).
+   Retain known ready/deleted fixtures and complete operation histories across
+   graceful PostgreSQL and backend pod replacement; verify accepted replay and
+   conflict behavior, database readiness, and subsequent create/ready/delete with
+   namespace absence. Require unchanged PVC/PV identities and no manual database
+   repair. The gate remains pending until passing evidence is durably archived
+   and linked here; this is not backup recovery, HA, failover, node loss, or PITR.
 4. Retain the initial 10-workflow/concurrency-2 capacity baseline, including cleanup.
 5. Decide broader architecture, identity, security, and recovery objectives
    before production-facing expansion.
