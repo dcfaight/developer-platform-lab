@@ -27,6 +27,12 @@ system, a monitoring stack, a saturation test, or a production-capacity claim.
 It does not model 3,000 developers, concurrent application traffic, realistic
 developer workloads, multi-replica throughput, or tenant isolation.
 
+**CAPACITY-01 is the next focused validation gate** in the
+[canonical roadmap](../docs/operating-model-and-sequence.md#current-delivery-gates).
+The harness exists, but no successful retained target-specific baseline result
+is recorded. Gate closure requires the [successful-run evidence contract](#validation-gate),
+not merely executing the harness or passing its offline tests.
+
 ### Prepare a disposable target
 
 1. Use a disposable cluster and platform installation from this revision with
@@ -76,6 +82,8 @@ python3 automation/capacity_baseline.py \
   --worker-host cluster \
   --cache-condition unknown \
   --artifacts /tmp/platform-capacity-evidence
+baseline_exit=$?
+printf 'exit_code=%s\n' "$baseline_exit" > /tmp/platform-capacity-evidence/run-exit.txt
 unset PLATFORM_BENCHMARK_PASSWORD PLATFORM_CAPACITY_BASELINE
 ```
 
@@ -87,6 +95,11 @@ Slots are refilled as workflows finish, rather than executing five fixed pairs;
 admission and evidence collection can introduce client-side gaps.
 No benchmark invocation is added to CI or a scheduler; normal CI runs only the
 offline safety tests.
+
+Use a fresh private artifacts directory for each attempt, changing all paths
+in the example accordingly. `/tmp` is staging, not durable retention. Record the
+sanitized invocation and effective deadline/poll/sample settings in an operator
+run record alongside the artifacts; never include credential values.
 
 For a host-run backend, select `--worker-host host` and explicitly supply
 `--worker-enabled true --worker-poll-delay-ms 1000` only if those are the actual
@@ -174,12 +187,51 @@ completion.
 
 ### Validation gate
 
-The harness and offline tests are implementation evidence only. A measured
-baseline requires a successful retained run on the named disposable target with
-its configuration and limitations. No measured capacity result is established
-by adding this tooling. The
-[roadmap](../docs/operating-model-and-sequence.md#current-delivery-gates)
-continues to require that evidence separately.
+The harness and offline tests are implementation evidence only. **Close
+CAPACITY-01 only with one retained successful target-specific run** of all
+10 existing `sample-service` environment lifecycles on a disposable target,
+with at most 2 concurrent workflows including cleanup. Do not combine partial
+attempts into a passing run. No measured baseline is established by this
+documentation or by adding the tooling.
+
+The retained bundle must contain `manifest.json`, `summary.txt`, `run-exit.txt`,
+and an operator run record covering the following evidence. Use the generated
+manifest/summary for fields the harness collects; supplement missing context
+without inferring values from repository defaults.
+
+| Required evidence | Acceptance / recording rule |
+|---|---|
+| Run identity and invocation | UTC date, run ID, checked-out revision (and any local changes), sanitized command, effective timeouts/poll/sample intervals, and exit code. Require exit `0`, manifest status `SUCCEEDED`, and `supportingEvidenceComplete=true`. |
+| Disposable target and configuration | Explicit kubeconfig context, platform namespace and matching loopback API target; cluster/node layout and versions, platform/workload images, resource budgets, and pre-existing background load. Record unavailable observations as unavailable and externally supplied/unobserved settings as unknown. |
+| Workload and concurrency | Exactly 10 `sample-service` lifecycles with 2 workflow slots maximum, including cleanup; retain generated names, original request bodies/keys, and accepted environment/create/delete operation IDs. |
+| Worker and cache conditions | Worker placement (`cluster` or `host`), enabled state, effective poll delay, replica count and other observed worker settings; image cache declaration (`cold`, `warm`, or `unknown`). Preserve unknowns and distinguish declared from observed configuration. |
+| Timings and completions | Mutation-attempt latency including errors/replays, available per-operation queue/provisioning/readiness/end-to-end timings, per-lifecycle duration, total elapsed time and completed per elapsed minute. Require completed `10/10`; retain missing measurements explicitly, never as zero. |
+| Failures and cleanup | Retain all request/workflow errors, retries/replays, cleanup errors and leftovers, explicitly including zero failures when none occurred. All 10 must reach `READY`, successful create/delete operations, API cleanup confirmation and namespace absence in the selected context; require no unresolved leftovers. |
+| Measurement availability | Require valid before/after operation-metrics snapshots with the worker enabled in preflight. Record availability of context and timing fields and READY/periodic CPU/memory samples, including unavailable/partial/not-collected states. Resource sampling is optional; unavailable/partial samples prevent resource-capacity conclusions but do not alone fail this lifecycle gate. |
+| Interpretation and retention | Record sampling and comparability limitations, unknown configuration, and the sanitized durable artifact reference. This is one bounded baseline measurement, not production capacity, saturation, autoscaling, or measured support for 3,000 developers. |
+
+After each attempt:
+
+1. Inspect the exit record, manifest and summary together. A nonzero exit,
+   incomplete supporting metrics, shortened run, failed lifecycle or unresolved
+   leftover cannot close the gate, even if later manual cleanup succeeds.
+   Preserve the failed attempt and follow [failure and recovery](#failure-and-recovery)
+   before starting a new run in a fresh directory.
+2. Review the bundle and operator record for secrets before transfer. Keep
+   original idempotency keys and IDs in access-controlled operator storage;
+   do not archive credentials, kubeconfig, Secrets or raw error bodies.
+3. Copy the entire run directory and operator record to an operator-managed
+   durable location **outside the checkout and ephemeral task environment**,
+   verify the archived copy is readable and complete, and retain failed/partial
+   attempts separately. A local `/tmp` path or unretained task log is not closure
+   evidence.
+4. Update **CAPACITY-01** in the
+   [canonical roadmap](../docs/operating-model-and-sequence.md#current-delivery-gates)
+   with date, target, revision, command/check, outcome, limitations and sanitized
+   durable evidence reference (no credentials or signed URLs). Until the passing
+   bundle is retained and referenced there, the gate remains evidence pending.
+   Keep GitOps, restart-persistence and other gates separate; this result does
+   not close them.
 
 ## Manual use
 
