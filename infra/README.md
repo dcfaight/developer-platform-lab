@@ -639,8 +639,9 @@ backup recovery.
 
 ## Disposable K3s restart persistence
 
-**PERSIST-01 — defined, live result/evidence pending.** This is the next focused
-validation increment after the GitOps gate, not evidence that GitOps has passed.
+**PERSIST-01 — defined, live result/evidence pending.** This gate definition
+preceded the [capacity-baseline increment](../automation/README.md#validation-gate);
+neither definition is evidence that GitOps or restart persistence has passed.
 The recorded manual lifecycle check, frontend-only GitOps drill, backend restart
 tests, and logical restore fixture do not prove K3s same-PVC restart persistence.
 No successful run of this drill is recorded.
