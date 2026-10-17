@@ -685,6 +685,12 @@ Measurements will distinguish:
 
 Any reported performance results will include the test environment and method.
 
+An opt-in [lifecycle capacity-baseline harness and operator runbook](automation/README.md#opt-in-lifecycle-capacity-baseline)
+defines an initial experimental profile of 10 `sample-service` lifecycles with
+at most 2 concurrent workflows including cleanup. Tooling and offline tests are
+not a validated measured run, an autoscaling system, a monitoring stack, or a
+production-capacity claim; retained target-specific evidence is still required.
+
 ## 17. Delivery Roadmap
 
 ### Milestone 1: Foundation
