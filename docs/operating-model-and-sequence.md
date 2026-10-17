@@ -123,8 +123,10 @@ and the validation-gate definitions/evidence contracts in
 and [PR #31](https://github.com/dcfaight/developer-platform-lab/pull/31) (capacity baseline)
 are complete as merged documentation work. Their live-validation and durable
 evidence obligations remain exactly as recorded in the gate table above.
-The next planning increment is architecture/recovery decision framing, not
-another claim that those validation gates passed.
+[PR #32](https://github.com/dcfaight/developer-platform-lab/pull/32) framed the
+remaining open decisions and proposed their review order. The checklist and
+record template below make that framing actionable; they do not claim that
+those validation gates passed.
 
 **All decisions below are open.** The accepted
 [Phase B decision](decisions/phase-b-target-architecture.md) remains unchanged:
@@ -148,6 +150,91 @@ not work authorized by this refinement.
 | **ARCH-01F — Network and credential/data-access hardening** | What network-policy enforcement and permitted flows fit the boundaries? How will worker blast radius, secret encryption/rotation, certificate renewal, and separate runtime/migration/backup database roles be handled and audited? | Depends on B/E and recovery dependencies in C; specify least-privilege policies and rotation/revocation tests before rollout, including recovery access without bypassing controls. |
 | **ARCH-01G — Retention, PITR, HA, and failover** | What backup scope, schedule, retention/deletion policy, off-site protection, and restore verification are required? Is point-in-time recovery (PITR) or high availability (HA) needed, and for which components? How do database recovery, replication, and failover meet C/D without treating replicas as backups? | Use C/D objectives and F access/secret requirements; decide mechanisms before implementing scheduled backups, PITR, HA, or automated failover. Require separate restore/site-loss drills and retained evidence. |
 
+### Architecture/recovery decision checklist
+
+Use this checklist during ARCH-01 review, alongside the questions in the
+register. Check an item only when a reviewed decision record is linked from the
+corresponding register entry (or from the sequencing item below). An explicit
+deferral must name an owner, revisit condition, and work that remains blocked;
+a checked item means the disposition is recorded, not that it is implemented
+or validated. All items start open.
+
+- [ ] **Hosting / control plane / isolation (A/B):** record hosting and
+  control-plane ownership, management-component operators, and required
+  management/workload isolation.
+- [ ] **Environment boundaries (B/D):** define disposable-target versus
+  longer-lived placement, dev/QA/UAT lifecycle and promotion/retirement
+  boundaries, and the detailed `prod1`/`prod2` separation. Preserve the accepted
+  continuity-pair intent without assuming a replication or failover mechanism.
+- [ ] **Recovery objectives (C):** identify required recovery outcomes and
+  prioritized failure modes, RPO/RTO by state/component, restore order, and
+  measurable success criteria with retained evidence requirements.
+- [ ] **Implementation sequencing (A–G):** link the reviewed dependency plan;
+  distinguish decision-needed, deferred/blocked, and implementation-ready work.
+  Identify which accepted records unblock each proposed implementation PR.
+- [ ] **Identity / access hardening (E):** record SSO/OIDC, account provisioning
+  and revocation, approval flow, role separation, service-account ownership,
+  break-glass access, and audit expectations.
+- [ ] **Data / platform hardening (F/G, informed by C/D):** record network
+  policy, secret rotation, database role separation, retention, PITR, and
+  HA/failover boundaries, including explicit deferrals and recovery dependencies.
+
+### Decision record template
+
+For each bounded decision, copy this template into a descriptively named
+Markdown file in `docs/decisions/`, consistent with
+`phase-b-target-architecture.md`. Replace placeholders, keep the initial status
+**Proposed**, and link the proposal from the register. Acceptance requires
+explicit review; neither this template nor a suggested option selects a design.
+Keep current gate status in the table above and link evidence rather than
+copying runbook histories into decision records.
+
+```markdown
+# ARCH-01<letter>: <Decision title>
+
+**Status:** Proposed (Accepted / Deferred / Superseded after review)
+**Date:** <YYYY-MM-DD>
+**Owner / reviewers:** <Accountable owner and required reviewers>
+**Roadmap reference:** <ARCH-01 register entry; related decision links>
+
+## Context
+
+<Decision needed, constraints, assumptions, affected environments/components,
+failure scenarios, and what remains outside scope.>
+
+## Options considered
+
+- <Option, benefits, trade-offs, risks, and operational/cost implications>
+- <Alternative, including retaining the current approach or deferring>
+
+## Decision
+
+<Pending review. After review, record the selected option or explicit deferral.>
+
+## Rationale
+
+<Why the disposition fits the constraints; why alternatives were not selected.>
+
+## Dependencies
+
+<Required decisions, identity/secret/data recovery order, evidence prerequisites,
+and implementation work blocked until these are satisfied.>
+
+## Consequences
+
+<Positive and negative effects, remaining risks, and rollback/safety boundaries.>
+
+## Acceptance criteria and evidence
+
+<Measurable outcomes, target/failure scope, required checks, and sanitized durable
+evidence references. Distinguish planned checks from recorded results.>
+
+## Follow-up work
+
+- [ ] <Scoped implementation/validation issue or PR, owner, and prerequisites>
+- [ ] <Deferred question, owner, revisit condition, and work that remains blocked>
+```
+
 ### Proposed decision and implementation sequence
 
 This is a proposed review order, not a selection of solutions or a requirement
@@ -160,7 +247,8 @@ to finish live gates before discussing architecture:
 2. Use those constraints to frame **B**, then **D and E**, then **F and G**.
    Iterate when identity recovery, database dependencies, site independence,
    or cost exposes a conflict. No option becomes accepted by appearing here.
-3. For each bounded decision, propose a record in `docs/decisions/`, following
+3. For each bounded decision, propose a record in `docs/decisions/` using the
+   [decision record template](#decision-record-template), following
    the existing Phase B pattern (`Status`, decision, assumptions/scope, meaning,
    and explicit non-claims). Mark it **Proposed** until explicitly accepted;
    include alternatives/trade-offs, dependencies, accountable owner/reviewer,
