@@ -389,8 +389,8 @@ docker compose stop postgres
 Use the portal/API deletion workflow or explicitly invoke the expiration CLI
 before stopping the worker. There is no daemon-triggered cleanup on expiry,
 failure, or shutdown.
-If you intentionally want to remove **all workloads in this disposable lab
-cluster**, the separate manual reset remains:
+If you intentionally want to remove **all workloads in this disposable local
+kind cluster**, the separate manual reset remains:
 
 ```sh
 kind delete cluster --name developer-platform-lab

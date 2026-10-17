@@ -1,6 +1,6 @@
 # Infrastructure
 
-## Local kind lab
+## Local kind development cluster
 
 `kind/cluster.yaml` defines a dedicated, single-node local development cluster.
 With Docker and kind installed, from the repository root:
@@ -26,15 +26,15 @@ It requires the `kind-developer-platform-lab` kubeconfig context and a loopback
 HTTPS API server; remote clusters are deliberately unsupported. Use a host-run
 backend, not a container with a different loopback network. Do not commit
 kubeconfig files or secrets. The kind admin credentials are for this disposable
-lab only, not a production permission model.
+development cluster only, not a production permission model.
 
 Provisioned namespaces are retained after failures or TTL expiry until explicitly
 deleted through the portal/API. The leased worker removes only owned namespaces
 and reports completion after absence is observed; see the [local lifecycle
 runbook](../docs/demo.md#4-delete-safely-and-verify-absence). Expiration
 cleanup is available through the manually invoked API-only CLI, not a scheduler.
-Deleting the entire disposable kind cluster above is
-a separate manual lab reset, not the platform deletion workflow.
+Deleting the entire disposable kind cluster above is a separate manual cluster
+reset, not the platform deletion workflow.
 
 ## Hardened single-host deployment (API-only)
 
@@ -209,7 +209,7 @@ grants by ownership labels or an `env-` name prefix. Application ownership check
 are not a security boundary against stolen worker credentials: a compromised
 backend could delete unrelated namespaces (including `platform-lab` or
 `kube-system`) or create/modify Deployments elsewhere.
-Use only a dedicated disposable lab cluster, not a shared or production cluster.
+Use only a dedicated disposable cluster, not a shared or production cluster.
 There is no Secrets, pod exec, RBAC-management, wildcard, or cluster-admin grant.
 
 Automatic service-account mounts stay disabled for every component. Only the
@@ -406,10 +406,10 @@ No successful run is implied by adding this check; record actual results.
 ### Recorded lifecycle validation — 2026-10-16
 
 **PASS:** after merging [PR #14](https://github.com/dcfaight/developer-platform-lab/pull/14),
-the worker-enabled K3s path was manually validated on the disposable lab cluster
+the worker-enabled K3s path was manually validated on the disposable K3s cluster
 using context `default` and HTTPS ingress `platform-test.local` at `192.168.1.5`.
-The create → provision → ready → authenticated delete → namespace cleanup lab
-goal is complete and working. This is not production readiness or evidence of an
+The create → provision → ready → authenticated delete → namespace cleanup
+validation is complete and working. This is not production readiness or evidence of an
 automated lifecycle-test run; backup/restore and restart persistence remain unverified.
 
 The recorded environment was `demo` (`fab18d99-7a86-4886-8960-31277137837f`),
@@ -471,7 +471,7 @@ kubectl --context "$K3S_CONTEXT" get namespace "$ENV_NAMESPACE"
 # Expected final result: NotFound (nonzero exit), not a connectivity/auth error.
 ```
 
-### Viewing the lab in OpenLens/Lens
+### Viewing the platform in OpenLens/Lens
 
 OpenLens, Lens, or a similar Kubernetes UI can browse this K3s cluster using a
 kubeconfig with the correct context and sufficient Kubernetes RBAC permissions.
