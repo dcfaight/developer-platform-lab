@@ -1,10 +1,9 @@
-FROM eclipse-temurin:17-jdk-jammy@sha256:43f4431cc895d37ceb115e2e1f160545ec45caee9c1cb4246fc6bb879d58aeda AS build
+FROM maven:3.9.16-eclipse-temurin-17@sha256:c97d0fa42bed8c381518d76d7ca541ff5c6427b21fa93ac6fc4bd68ffb9a258d AS build
 WORKDIR /build
-COPY .mvn .mvn
-COPY mvnw pom.xml ./
-RUN ./mvnw --batch-mode dependency:go-offline
+COPY pom.xml ./
+RUN mvn --batch-mode dependency:go-offline
 COPY src src
-RUN ./mvnw --batch-mode -DskipTests package
+RUN mvn --batch-mode -DskipTests package
 
 FROM eclipse-temurin:17-jre-jammy@sha256:8993f1aed8b25fcea7a7047a7949c1866fa558fc6830d938c22c4f13b26be9d7
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
