@@ -4,7 +4,11 @@ import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.Namespace;
 import io.fabric8.kubernetes.api.model.NamespaceBuilder;
 import io.fabric8.kubernetes.api.model.DeleteOptionsBuilder;
+import io.fabric8.kubernetes.api.model.LimitRange;
+import io.fabric8.kubernetes.api.model.LimitRangeBuilder;
 import io.fabric8.kubernetes.api.model.Quantity;
+import io.fabric8.kubernetes.api.model.ResourceQuota;
+import io.fabric8.kubernetes.api.model.ResourceQuotaBuilder;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.apps.DeploymentBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
@@ -28,6 +32,8 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
     static final String CREATE_OPERATION_ID = "platform-lab/create-operation-id";
     static final String DEPLOYMENT = "sample-service";
     static final String IMAGE = "nginxinc/nginx-unprivileged:1.28-alpine";
+    static final String RESOURCE_QUOTA = "platform-environment-budget";
+    static final String LIMIT_RANGE = "platform-container-defaults";
     private final KubernetesClient client;
 
     @Autowired
@@ -73,6 +79,10 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
             requireOwned(namespace, environment);
             if (createOperationId != null) {
                 requireCreateOwnerIfPresent(namespace, createOperationId);
+            }
+            if (!reconcileResourceQuota(environment, leaseValid)
+                    || !reconcileLimitRange(environment, leaseValid)) {
+                return null;
             }
             Deployment existing = client.apps().deployments().inNamespace(environment.namespace())
                     .withName(DEPLOYMENT).get();
@@ -201,6 +211,88 @@ public class KubernetesEnvironmentProvisioner implements EnvironmentProvisioner,
 
     private static Map<String, String> ownership(EnvironmentRecord environment) {
         return Map.of(MANAGED_BY, "platform-lab", ENVIRONMENT_ID, environment.id().toString());
+    }
+
+    private boolean reconcileResourceQuota(EnvironmentRecord environment, OperationProgress leaseValid) {
+        var operation = client.resourceQuotas().inNamespace(environment.namespace()).withName(RESOURCE_QUOTA);
+        ResourceQuota existing = operation.get();
+        ResourceQuota desired = resourceQuota(environment);
+        if (existing == null) {
+            if (!leaseValid.getAsBoolean()) {
+                return false;
+            }
+            client.resourceQuotas().inNamespace(environment.namespace()).resource(desired).create();
+        } else {
+            requireOwned(existing, environment);
+            if (!desired.getSpec().equals(existing.getSpec())) {
+                requireResourceVersion(existing);
+                desired.setMetadata(existing.getMetadata());
+                if (!leaseValid.getAsBoolean()) {
+                    return false;
+                }
+                client.resourceQuotas().inNamespace(environment.namespace()).resource(desired)
+                        .lockResourceVersion(existing.getMetadata().getResourceVersion()).replace();
+            }
+        }
+        return true;
+    }
+
+    private boolean reconcileLimitRange(EnvironmentRecord environment, OperationProgress leaseValid) {
+        var operation = client.limitRanges().inNamespace(environment.namespace()).withName(LIMIT_RANGE);
+        LimitRange existing = operation.get();
+        LimitRange desired = limitRange(environment);
+        if (existing == null) {
+            if (!leaseValid.getAsBoolean()) {
+                return false;
+            }
+            client.limitRanges().inNamespace(environment.namespace()).resource(desired).create();
+        } else {
+            requireOwned(existing, environment);
+            if (!desired.getSpec().equals(existing.getSpec())) {
+                requireResourceVersion(existing);
+                desired.setMetadata(existing.getMetadata());
+                if (!leaseValid.getAsBoolean()) {
+                    return false;
+                }
+                client.limitRanges().inNamespace(environment.namespace()).resource(desired)
+                        .lockResourceVersion(existing.getMetadata().getResourceVersion()).replace();
+            }
+        }
+        return true;
+    }
+
+    private static void requireResourceVersion(HasMetadata resource) {
+        var metadata = resource.getMetadata();
+        if (metadata.getResourceVersion() == null || metadata.getResourceVersion().isBlank()) {
+            throw new ProvisioningException("KUBERNETES_VALIDATION_FAILED",
+                    "The Kubernetes resource identity is missing.", false);
+        }
+    }
+
+    static ResourceQuota resourceQuota(EnvironmentRecord environment) {
+        Map<String, String> labels = ownership(environment);
+        return new ResourceQuotaBuilder()
+                .withNewMetadata().withName(RESOURCE_QUOTA).withNamespace(environment.namespace())
+                    .withLabels(labels).withAnnotations(labels).endMetadata()
+                .withNewSpec().withHard(Map.of(
+                        "requests.cpu", new Quantity("2"),
+                        "requests.memory", new Quantity("2Gi"),
+                        "limits.cpu", new Quantity("4"),
+                        "limits.memory", new Quantity("4Gi"),
+                        "pods", new Quantity("10")))
+                .endSpec().build();
+    }
+
+    static LimitRange limitRange(EnvironmentRecord environment) {
+        Map<String, String> labels = ownership(environment);
+        return new LimitRangeBuilder()
+                .withNewMetadata().withName(LIMIT_RANGE).withNamespace(environment.namespace())
+                    .withLabels(labels).withAnnotations(labels).endMetadata()
+                .withNewSpec().addNewLimit().withType("Container")
+                    .withDefault(Map.of("cpu", new Quantity("500m"), "memory", new Quantity("256Mi")))
+                    .withDefaultRequest(Map.of("cpu", new Quantity("100m"), "memory", new Quantity("64Mi")))
+                    .withMax(Map.of("cpu", new Quantity("1"), "memory", new Quantity("1Gi")))
+                .endLimit().endSpec().build();
     }
 
     private static void requireOwned(HasMetadata resource, EnvironmentRecord environment) {

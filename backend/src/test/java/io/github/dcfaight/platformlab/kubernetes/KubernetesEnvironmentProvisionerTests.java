@@ -7,6 +7,9 @@ import com.sun.net.httpserver.HttpServer;
 import io.fabric8.kubernetes.api.model.Namespace;
 import io.fabric8.kubernetes.api.model.NamespaceBuilder;
 import io.fabric8.kubernetes.api.model.DeleteOptions;
+import io.fabric8.kubernetes.api.model.HasMetadata;
+import io.fabric8.kubernetes.api.model.LimitRange;
+import io.fabric8.kubernetes.api.model.ResourceQuota;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.apps.DeploymentStatusBuilder;
 import io.fabric8.kubernetes.client.Config;
@@ -27,10 +30,13 @@ class KubernetesEnvironmentProvisionerTests {
     private KubernetesEnvironmentProvisioner provisioner;
     private final EnvironmentRecord environment = environment();
     private Namespace namespace;
+    private ResourceQuota resourceQuota;
+    private LimitRange limitRange;
     private Deployment deployment;
     private int writes;
     private int failure;
     private int createFailure;
+    private String createFailureKind;
     private boolean createRace;
     private boolean staleUpdate;
     private boolean redirect;
@@ -68,7 +74,7 @@ class KubernetesEnvironmentProvisionerTests {
     @Test
     void provisionsApprovedWorkloadAndRerunsWithoutWrites() {
         provisioner.provision(environment);
-        assertEquals(2, writes);
+        assertEquals(4, writes);
         assertEquals("env-" + environment.id().toString().replace("-", ""), namespace.getMetadata().getName());
         assertEquals("platform-lab", namespace.getMetadata().getLabels()
                 .get(KubernetesEnvironmentProvisioner.MANAGED_BY));
@@ -81,12 +87,20 @@ class KubernetesEnvironmentProvisionerTests {
         assertNotNull(container.getReadinessProbe().getHttpGet());
         assertNotNull(container.getLivenessProbe().getHttpGet());
         assertEquals("128Mi", container.getResources().getLimits().get("memory").toString());
+        assertEquals("2", resourceQuota.getSpec().getHard().get("requests.cpu").toString());
+        assertEquals("2Gi", resourceQuota.getSpec().getHard().get("requests.memory").toString());
+        assertEquals("10", resourceQuota.getSpec().getHard().get("pods").toString());
+        assertEquals("100m", limitRange.getSpec().getLimits().get(0).getDefaultRequest().get("cpu").toString());
+        assertEquals("500m", limitRange.getSpec().getLimits().get(0).getDefault().get("cpu").toString());
+        assertEquals("1", limitRange.getSpec().getLimits().get(0).getMax().get("cpu").toString());
+        assertTrue(container.getResources().getRequests().get("cpu")
+                .compareTo(limitRange.getSpec().getLimits().get(0).getMax().get("cpu")) < 0);
         assertTrue(container.getSecurityContext().getReadOnlyRootFilesystem());
         assertFalse(container.getSecurityContext().getAllowPrivilegeEscalation());
         assertFalse(pod.getAutomountServiceAccountToken());
         assertTrue(pod.getSecurityContext().getRunAsNonRoot());
         provisioner.provision(environment);
-        assertEquals(2, writes);
+        assertEquals(4, writes);
     }
 
     @Test
@@ -101,15 +115,16 @@ class KubernetesEnvironmentProvisionerTests {
             return false;
         });
         assertEquals(uid, namespace.getMetadata().getUid());
-        assertEquals(2, writes);
+        assertEquals(4, writes);
     }
 
     @Test
-    void restartAfterNamespaceCreationOnlyCreatesMissingDeployment() {
+    void restartAfterNamespaceCreationReconcilesRemainingResources() {
         var checks = new java.util.concurrent.atomic.AtomicInteger();
         provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() == 1);
         assertNotNull(namespace);
         assertNull(deployment);
+        assertNull(resourceQuota);
         assertEquals(1, writes);
         String uid = namespace.getMetadata().getUid();
         provisioner.close();
@@ -117,10 +132,12 @@ class KubernetesEnvironmentProvisionerTests {
 
         provisioner.provision(environment, createOperationId, () -> true);
         assertNotNull(deployment);
+        assertNotNull(resourceQuota);
+        assertNotNull(limitRange);
         assertEquals(uid, namespace.getMetadata().getUid());
-        assertEquals(2, writes);
+        assertEquals(4, writes);
         provisioner.provision(environment, createOperationId, () -> true);
-        assertEquals(2, writes);
+        assertEquals(4, writes);
     }
 
     @Test
@@ -159,7 +176,29 @@ class KubernetesEnvironmentProvisionerTests {
         assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT", () -> provisioner.isReady(environment));
         namespace.getMetadata().setDeletionTimestamp("2026-01-01T00:00:00Z");
         assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT", () -> provisioner.provision(environment));
-        assertEquals(2, writes);
+        assertEquals(4, writes);
+    }
+
+    @Test
+    void refusesUnownedQuotaOrLimitRangeWithoutMutation() {
+        provisioner.provision(environment);
+        resourceQuota.getMetadata().getAnnotations().clear();
+        assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT", () -> provisioner.provision(environment));
+        resourceQuota.getMetadata().getAnnotations().putAll(Map.of(
+                KubernetesEnvironmentProvisioner.MANAGED_BY, "platform-lab",
+                KubernetesEnvironmentProvisioner.ENVIRONMENT_ID, environment.id().toString()));
+        limitRange.getMetadata().getLabels().clear();
+        assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT", () -> provisioner.provision(environment));
+        assertEquals(4, writes);
+    }
+
+    @Test
+    void reconcilesOwnedQuotaDriftWithResourceVersion() {
+        provisioner.provision(environment);
+        resourceQuota.getSpec().getHard().put("pods", new io.fabric8.kubernetes.api.model.Quantity("20"));
+        provisioner.provision(environment);
+        assertEquals("10", resourceQuota.getSpec().getHard().get("pods").toString());
+        assertEquals(5, writes);
     }
 
     @Test
@@ -176,14 +215,14 @@ class KubernetesEnvironmentProvisionerTests {
         provisioner.provision(environment);
         deployment.getSpec().getTemplate().getSpec().getContainers().get(0).setImage("unapproved");
         provisioner.provision(environment);
-        assertEquals(3, writes);
+        assertEquals(5, writes);
         assertEquals(KubernetesEnvironmentProvisioner.IMAGE,
                 deployment.getSpec().getTemplate().getSpec().getContainers().get(0).getImage());
         deployment.getSpec().setReplicas(2);
         staleUpdate = true;
         assertTrue(assertThrows(ProvisioningException.class, () -> provisioner.provision(environment)).retryable());
         assertEquals(2, deployment.getSpec().getReplicas());
-        assertEquals(3, writes);
+        assertEquals(5, writes);
     }
 
     @Test
@@ -224,6 +263,23 @@ class KubernetesEnvironmentProvisionerTests {
         assertNull(error.getCause());
         assertNull(namespace);
         assertEquals(0, writes);
+    }
+
+    @Test
+    void quotaCreationFailureUsesSanitizedActionableDetails() {
+        var checks = new java.util.concurrent.atomic.AtomicInteger();
+        provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() == 1);
+        createFailure = 422;
+        createFailureKind = "ResourceQuota";
+        var error = assertThrows(ProvisioningException.class,
+                () -> provisioner.provision(environment, createOperationId));
+        assertEquals("KUBERNETES_REQUEST_REJECTED", error.code());
+        assertEquals("The Kubernetes API rejected the environment request.", error.getMessage());
+        assertNull(error.getCause());
+        assertNotNull(namespace);
+        assertNull(resourceQuota);
+        assertNull(deployment);
+        assertEquals(1, writes);
     }
 
     @Test
@@ -331,11 +387,22 @@ class KubernetesEnvironmentProvisionerTests {
     }
 
     @Test
+    void checksLeaseBeforeEachGuardrailCreate() {
+        var checks = new java.util.concurrent.atomic.AtomicInteger();
+        provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() == 1);
+        checks.set(0);
+        provisioner.provision(environment, createOperationId, () -> checks.incrementAndGet() <= 1);
+        assertNotNull(resourceQuota);
+        assertNull(limitRange);
+        assertEquals(2, writes);
+    }
+
+    @Test
     void createChecksLeaseBeforeReplacingDeployment() {
         provisioner.provision(environment, createOperationId);
         deployment.getSpec().setReplicas(2);
         provisioner.provision(environment, createOperationId, () -> false);
-        assertEquals(2, writes);
+        assertEquals(4, writes);
         assertEquals(2, deployment.getSpec().getReplicas());
     }
 
@@ -344,7 +411,7 @@ class KubernetesEnvironmentProvisionerTests {
         provisioner.provision(environment, createOperationId);
         assertPermanent("KUBERNETES_OWNERSHIP_CONFLICT",
                 () -> provisioner.provision(environment, UUID.randomUUID(), () -> true));
-        assertEquals(2, writes);
+        assertEquals(4, writes);
     }
 
     @Test
@@ -385,7 +452,7 @@ class KubernetesEnvironmentProvisionerTests {
         assertEquals(uid, deleteOptions.getPreconditions().getUid());
         assertEquals(version, deleteOptions.getPreconditions().getResourceVersion());
         assertEquals(1, deletes);
-        assertEquals(2, writes, "Legacy ownership must never be relabeled");
+        assertEquals(4, writes, "Legacy ownership must never be relabeled");
         assertFalse(namespace.getMetadata().getLabels().containsKey(KubernetesEnvironmentProvisioner.CREATE_OPERATION_ID));
         assertFalse(namespace.getMetadata().getAnnotations()
                 .containsKey(KubernetesEnvironmentProvisioner.CREATE_OPERATION_ID));
@@ -485,19 +552,26 @@ class KubernetesEnvironmentProvisionerTests {
                 return;
             }
             String path = exchange.getRequestURI().getPath();
-            boolean namespaces = path.startsWith("/api/v1/namespaces");
+            String namespacedPrefix = "/api/v1/namespaces/" + environment.namespace() + "/";
+            boolean namespaces = path.equals("/api/v1/namespaces")
+                    || path.equals("/api/v1/namespaces/" + environment.namespace());
+            boolean quotas = path.startsWith(namespacedPrefix + "resourcequotas");
+            boolean limitRanges = path.startsWith(namespacedPrefix + "limitranges");
             boolean deployments = path.startsWith("/apis/apps/v1/namespaces/" + environment.namespace()
                     + "/deployments");
-            if (!namespaces && !deployments) {
+            if (!namespaces && !quotas && !limitRanges && !deployments) {
                 respond(exchange, 404, null);
                 return;
             }
             String method = exchange.getRequestMethod();
             if ("GET".equals(method)) {
-                Object resource = namespaces ? namespace : deployment;
+                Object resource = namespaces ? namespace : quotas ? resourceQuota
+                        : limitRanges ? limitRange : deployment;
                 respond(exchange, resource == null ? 404 : 200, resource);
             } else if ("POST".equals(method)) {
-                if (createFailure != 0) {
+                String kind = namespaces ? "Namespace" : quotas ? "ResourceQuota"
+                        : limitRanges ? "LimitRange" : "Deployment";
+                if (createFailure != 0 && (createFailureKind == null || createFailureKind.equals(kind))) {
                     respond(exchange, createFailure, null);
                     return;
                 }
@@ -510,13 +584,24 @@ class KubernetesEnvironmentProvisionerTests {
                     namespace = Serialization.unmarshal(json, Namespace.class);
                     namespace.getMetadata().setResourceVersion("1");
                     namespace.getMetadata().setUid(UUID.randomUUID().toString());
+                } else if (quotas) {
+                    resourceQuota = Serialization.unmarshal(json, ResourceQuota.class);
+                    resourceQuota.getMetadata().setResourceVersion("1");
+                } else if (limitRanges) {
+                    limitRange = Serialization.unmarshal(json, LimitRange.class);
+                    limitRange.getMetadata().setResourceVersion("1");
                 } else {
+                    if (resourceQuota == null || limitRange == null) {
+                        respond(exchange, 409, null);
+                        return;
+                    }
                     deployment = Serialization.unmarshal(json, Deployment.class);
                     deployment.getMetadata().setResourceVersion("1");
                     deployment.getMetadata().setGeneration(1L);
                 }
                 writes++;
-                respond(exchange, 201, namespaces ? namespace : deployment);
+                respond(exchange, 201, namespaces ? namespace : quotas ? resourceQuota
+                        : limitRanges ? limitRange : deployment);
             } else if ("DELETE".equals(method) && namespaces) {
                 deleteOptions = Serialization.unmarshal(exchange.getRequestBody(), DeleteOptions.class);
                 if (goneOnDelete) {
@@ -538,17 +623,27 @@ class KubernetesEnvironmentProvisionerTests {
                 deletes++;
                 namespace.getMetadata().setDeletionTimestamp("2026-01-01T00:00:00Z");
                 respond(exchange, 202, namespace);
-            } else if ("PUT".equals(method) && deployments) {
-                var update = Serialization.unmarshal(exchange.getRequestBody(), Deployment.class);
-                if (staleUpdate || !deployment.getMetadata().getResourceVersion()
+            } else if ("PUT".equals(method) && (deployments || quotas || limitRanges)) {
+                HasMetadata existing = deployments ? deployment : quotas ? resourceQuota : limitRange;
+                HasMetadata update = deployments ? Serialization.unmarshal(
+                        exchange.getRequestBody(), Deployment.class) : quotas ? Serialization.unmarshal(
+                        exchange.getRequestBody(), ResourceQuota.class) : Serialization.unmarshal(
+                        exchange.getRequestBody(), LimitRange.class);
+                if ((staleUpdate && deployments) || !existing.getMetadata().getResourceVersion()
                         .equals(update.getMetadata().getResourceVersion())) {
                     respond(exchange, 409, null);
                     return;
                 }
-                deployment = update;
-                deployment.getMetadata().setResourceVersion("2");
+                update.getMetadata().setResourceVersion("2");
+                if (deployments) {
+                    deployment = (Deployment) update;
+                } else if (quotas) {
+                    resourceQuota = (ResourceQuota) update;
+                } else {
+                    limitRange = (LimitRange) update;
+                }
                 writes++;
-                respond(exchange, 200, deployment);
+                respond(exchange, 200, update);
             } else {
                 respond(exchange, 405, null);
             }
