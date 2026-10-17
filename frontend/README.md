@@ -51,6 +51,8 @@ Basic authentication.
   cancellation and does not guarantee absence.
   Recovery is scoped to the signed-in username; signing in again is required
   after a reload, and another account cannot replay the previous account's intent.
+  Ownerless legacy intents are discarded; persisted payloads are restored only
+  after an authenticated, exact username match.
 - Environment detail exposes guarded deletion for READY, FAILED, and DELETE_FAILED
   environments without a pending/running latest operation. Confirm the exact
   `namespace/name` in a keyboard-accessible dialog, or cancel without sending a request.

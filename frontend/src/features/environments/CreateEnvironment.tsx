@@ -9,7 +9,7 @@ const KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 interface CreationIntent {
   key: string
   payload: CreateEnvironmentRequest
-  username?: string
+  username: string
   conflict?: boolean
 }
 
@@ -28,13 +28,13 @@ function validIntent(value: unknown): CreationIntent | null {
     || payload.templateId !== 'sample-service' || typeof payload.ttlHours !== 'number'
     || !Number.isInteger(payload.ttlHours) || payload.ttlHours < 1 || payload.ttlHours > 24
     || (payload.teamId !== undefined && (typeof payload.teamId !== 'string' || !payload.teamId.trim()))
-    || (item.username !== undefined && typeof item.username !== 'string')
+    || typeof item.username !== 'string' || !item.username.trim()
     || (item.conflict !== undefined && typeof item.conflict !== 'boolean')) return null
   return {
     key: item.key,
     payload: { name: payload.name, templateId: 'sample-service', ttlHours: payload.ttlHours,
       ...(typeof payload.teamId === 'string' ? { teamId: payload.teamId } : {}) },
-    ...(typeof item.username === 'string' ? { username: item.username } : {}),
+    username: item.username,
     ...(item.conflict ? { conflict: true } : {}),
   }
 }
@@ -45,9 +45,12 @@ function readIntent(): CreationIntent | null {
     if (!stored) return null
     const parsed = JSON.parse(stored) as unknown
     const intent = validIntent(parsed)
-    if (!intent) window.sessionStorage.removeItem(STORAGE_KEY)
-    if (intent?.username && intent.username !== getSession()?.identity.username) return null
-    return intent
+    if (!intent) {
+      window.sessionStorage.removeItem(STORAGE_KEY)
+      return null
+    }
+    const session = getSession()
+    return session && intent.username === session.identity.username ? intent : null
   } catch {
     return null
   }
@@ -111,7 +114,7 @@ export function CreateEnvironment() {
   }
 
   return <CreationForm key={version}
-    initialIntent={memoryIntent?.username === session?.identity.username ? memoryIntent : null}
+    initialIntent={session && memoryIntent?.username === session.identity.username ? memoryIntent : null}
     initialDraft={session ? drafts.initial : drafts.anonymous}
     onIntentChange={setMemoryIntent}
     onDraftChange={session ? undefined : (anonymous) => setDrafts((current) => ({ ...current, anonymous }))} />

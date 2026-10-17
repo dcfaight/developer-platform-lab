@@ -513,6 +513,52 @@ describe('portal', () => {
   })
 })
 
+describe('persisted creation ownership', () => {
+  const storageKey = 'dpl.environment-creation.v1'
+  const payload = { name: 'Private persisted environment', templateId: 'sample-service', ttlHours: 19, teamId: 'private-team' }
+  const otherOperator = { ...operatorSession, identity: { ...operatorSession.identity, username: 'bob' } }
+
+  it.each([null, 'alice', 'bob'])('removes ownerless legacy intents without exposing their payload to %s', (username) => {
+    setSession(username === null ? null : username === 'alice' ? operatorSession : otherOperator)
+    window.sessionStorage.setItem(storageKey, JSON.stringify({ version: 1, key: 'legacy-ownerless-key', payload }))
+    window.history.replaceState(null, '', '/#create')
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    expect(screen.getByLabelText('Environment name')).toHaveProperty('value', '')
+    expect(screen.getByLabelText('Lifetime (hours)')).toHaveProperty('value', '8')
+    expect(screen.getByLabelText('Team')).toHaveProperty('value', '')
+    expect(screen.queryByText(/Private persisted environment/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry the same request' })).toBeNull()
+    expect(window.sessionStorage.getItem(storageKey)).toBeNull()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each([null, 'bob', 'Alice'])('restores owned persisted payload only after exact authenticated match, not %s', (username) => {
+    setSession(username === null ? null : { ...operatorSession, identity: { ...operatorSession.identity, username } })
+    const stored = JSON.stringify({ version: 1, key: 'owned-request-key', username: 'alice', payload })
+    window.sessionStorage.setItem(storageKey, stored)
+    window.history.replaceState(null, '', '/#create')
+    vi.stubGlobal('fetch', vi.fn())
+    render(<App />)
+    expect(screen.getByLabelText('Environment name')).toHaveProperty('value', '')
+    expect(screen.getByLabelText('Lifetime (hours)')).toHaveProperty('value', '8')
+    expect(screen.queryByRole('button', { name: 'Retry the same request' })).toBeNull()
+    expect(screen.queryByText(/Private persisted environment/)).toBeNull()
+    act(() => setSession(operatorSession))
+    expect(screen.getByLabelText('Environment name')).toHaveProperty('value', payload.name)
+    expect(screen.getByLabelText('Lifetime (hours)')).toHaveProperty('value', '19')
+    expect(screen.getByRole('button', { name: 'Retry the same request' })).toBeTruthy()
+    expect(window.sessionStorage.getItem(storageKey)).toBe(stored)
+    act(() => setSession(otherOperator))
+    expect(screen.getByLabelText('Environment name')).toHaveProperty('value', '')
+    expect(screen.queryByRole('button', { name: 'Retry the same request' })).toBeNull()
+    act(() => setSession(null))
+    expect(screen.getByLabelText('Environment name')).toHaveProperty('value', '')
+    expect(screen.queryByText(/Private persisted environment/)).toBeNull()
+  })
+})
+
 function identityPortal(me: () => Promise<Response>, post?: () => Promise<Response>) {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (url === '/api/v1/me') return me()

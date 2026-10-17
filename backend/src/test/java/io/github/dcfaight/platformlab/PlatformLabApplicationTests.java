@@ -1137,12 +1137,13 @@ class PlatformLabApplicationTests {
     }
 
     @Test
-    void cleanupCanListGloballyButCannotReadDetailsHistoryOperationsOrMetrics() throws Exception {
+    void cleanupCanDiscoverEnvironmentsButCannotReadHistoryOperationsOrMetrics() throws Exception {
         seedTeams();
         var created = postAs(TestUsers.DEVELOPER, "cleanup-team", teamPayload("Expired", "team-a"));
         UUID id = UUID.fromString(uuid(created.json(), "environmentId"));
         finishCreation(id, "READY");
-        for (String path : List.of("/api/v1/environments/" + id, "/api/v1/environments/" + id + "/operations",
+        assertEquals(200, getAs(TestUsers.CLEANUP, "/api/v1/environments/" + id).status());
+        for (String path : List.of("/api/v1/environments/" + id + "/operations",
                 "/api/v1/operations/" + uuid(created.json(), "operationId"), "/api/v1/operations/metrics")) {
             assertForbidden(getAs(TestUsers.CLEANUP, path));
         }
