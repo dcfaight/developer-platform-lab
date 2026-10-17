@@ -1,7 +1,7 @@
 # Operating Model and Delivery Sequence
 
 **Canonical current status and roadmap.** Last reviewed October 17, 2026,
-for the post-PR #30 validation sequence. Update this document when implementation
+for the post-PR #31 architecture/recovery planning sequence. Update this document when implementation
 or validation evidence changes; README and runbooks provide entry points and execution details, not
 competing status matrices.
 
@@ -31,7 +31,7 @@ ephemeral task environment; it does not mean the artifact is durably retained.
 
 ## Current delivery gates
 
-This is the durable roadmap record after PR #30, not a claim of new validation.
+This is the durable roadmap record after PR #31, not a claim of new validation.
 **CAPACITY-01 is the next focused validation gate**, after the GitOps and
 restart-persistence gate definitions. The documented sequence remains
 **GITOPS-01 → PERSIST-01 → CAPACITY-01 → ARCH-01**; defining those prior gates
@@ -96,8 +96,10 @@ production changes:
    target/revision/outcome and durable evidence reference here. Harness tests
    alone do not close this gate, and this is not production capacity or
    autoscaling proof.
-5. Decide broader architecture, identity, security, and recovery objectives
-   before production-facing expansion.
+5. Refine **ARCH-01** through the [open decision register and proposed decision
+   sequence](#open-decisions-and-deferred-scope) before production-facing
+   expansion. Decision preparation can proceed while gate evidence is pending;
+   it does not close those gates or authorize implementation.
 
 This is a priority order, not a hard dependency on GitOps. Automated K3s
 lifecycle and retained logical-restore evidence can be completed independently,
@@ -111,6 +113,81 @@ target. It does not close restart persistence, backup recovery, or production
 continuity/readiness gates.
 
 ## Open decisions and deferred scope
+
+### ARCH-01 scope and prior work
+
+The roadmap consolidation in [PR #28](https://github.com/dcfaight/developer-platform-lab/pull/28)
+and the validation-gate definitions/evidence contracts in
+[PR #29](https://github.com/dcfaight/developer-platform-lab/pull/29) (GitOps),
+[PR #30](https://github.com/dcfaight/developer-platform-lab/pull/30) (restart persistence),
+and [PR #31](https://github.com/dcfaight/developer-platform-lab/pull/31) (capacity baseline)
+are complete as merged documentation work. Their live-validation and durable
+evidence obligations remain exactly as recorded in the gate table above.
+The next planning increment is architecture/recovery decision framing, not
+another claim that those validation gates passed.
+
+**All decisions below are open.** The accepted
+[Phase B decision](decisions/phase-b-target-architecture.md) remains unchanged:
+it records intended population and continuity topology, not the architecture
+choices below. These are decision prompts, not selected designs, implementation
+commitments, or production-readiness criteria already met.
+
+### Open decision register
+
+The identifiers group future decision records under ARCH-01; they are not
+additional validation gates. The last column describes follow-on sequencing,
+not work authorized by this refinement.
+
+| Decision needed (all open) | Questions to resolve in a decision record | Implementation sequencing after an explicit decision |
+|---|---|---|
+| **ARCH-01A — Hosting and control-plane ownership** | Managed or self-operated hosting/control planes? Who owns upgrades, patching, incidents, access, and failure-domain isolation? What availability, cost, and operating constraints drive the choice? | Establish ownership and hosting boundaries before choosing cluster layouts or provisioning shared infrastructure. |
+| **ARCH-01B — Management placement and environment boundaries** | Where do the portal/API, workers, GitOps, identity dependencies, and platform database run? How are management, dev/QA/UAT, and production separated? Which credentials and dependencies cross boundaries, and can management survive a workload-site outage? | Use A and C to define trust/failure boundaries before designing cross-cluster access, promotion paths, or worker permissions. |
+| **ARCH-01C — Recovery objectives and restore order** | What RPO (acceptable data loss) and RTO (acceptable recovery time) apply to platform state and workload data for pod, node, cluster, and site loss? Who declares recovery, and in what order must identity, secrets, storage/database, management, and workloads return? | Agree objectives and a dependency/recovery order before selecting backup, replication, or failover mechanisms. Define required recovery evidence separately from the existing bounded drills. |
+| **ARCH-01D — prod1/prod2 implementation** | How will intended site independence be achieved? Active/passive or active/active? What data ownership/replication, traffic switching, fencing/split-brain protection, planned switchover, failover, and failback model fits the objectives? | Depends on A–C; implement only in separately scoped work with explicit safety, rollback, and site-loss acceptance criteria. The continuity-pair intent does not select a mechanism. |
+| **ARCH-01E — SSO/OIDC and account management** | Which identity provider and trust model? How do claims map to operator/developer/cleanup permissions and team membership? Who owns provisioning, revocation, service accounts, break-glass access, and audit? | Use B/C trust and recovery boundaries; decide identity/account lifecycle before production-facing access expansion. Preserve current role/team safeguards until a separately reviewed migration is validated. |
+| **ARCH-01F — Network and credential/data-access hardening** | What network-policy enforcement and permitted flows fit the boundaries? How will worker blast radius, secret encryption/rotation, certificate renewal, and separate runtime/migration/backup database roles be handled and audited? | Depends on B/E and recovery dependencies in C; specify least-privilege policies and rotation/revocation tests before rollout, including recovery access without bypassing controls. |
+| **ARCH-01G — Retention, PITR, HA, and failover** | What backup scope, schedule, retention/deletion policy, off-site protection, and restore verification are required? Is point-in-time recovery (PITR) or high availability (HA) needed, and for which components? How do database recovery, replication, and failover meet C/D without treating replicas as backups? | Use C/D objectives and F access/secret requirements; decide mechanisms before implementing scheduled backups, PITR, HA, or automated failover. Require separate restore/site-loss drills and retained evidence. |
+
+### Proposed decision and implementation sequence
+
+This is a proposed review order, not a selection of solutions or a requirement
+to finish live gates before discussing architecture:
+
+1. Start with **A and C together**: identify operating ownership, constraints,
+   failure scenarios, and candidate recovery objectives. Revisit hosting if
+   objectives cannot be supported; do not invent RPO/RTO targets from the
+   disposable logical-restore timings.
+2. Use those constraints to frame **B**, then **D and E**, then **F and G**.
+   Iterate when identity recovery, database dependencies, site independence,
+   or cost exposes a conflict. No option becomes accepted by appearing here.
+3. For each bounded decision, propose a record in `docs/decisions/`, following
+   the existing Phase B pattern (`Status`, decision, assumptions/scope, meaning,
+   and explicit non-claims). Mark it **Proposed** until explicitly accepted;
+   include alternatives/trade-offs, dependencies, accountable owner/reviewer,
+   measurable acceptance criteria, and unresolved or explicitly deferred items
+   with revisit conditions. Link accepted/deferred outcomes from this register
+   while keeping the gate table as the sole current-status record.
+4. Only after the relevant decisions are accepted, propose separate,
+   narrowly scoped implementation and validation PRs in dependency order.
+   Define target, safety/rollback boundaries, expected measurements, and durable
+   evidence requirements for each. Decision acceptance is not implementation,
+   successful recovery, or authorization for production deployment.
+
+### Outside the current validation gates
+
+GITOPS-01 tests bounded frontend reconciliation/revert, PERSIST-01 tests graceful
+same-PVC pod restarts, and CAPACITY-01 tests a small fixed lifecycle baseline.
+RESTORE-01 is a fixture-based logical round trip. None decides ownership,
+isolation, identity assurance, RPO/RTO, retention, PITR, HA, or site failover;
+passing them cannot close ARCH-01 or establish production readiness.
+Existing runbooks and historical attempts remain in
+[infra/README.md](../infra/README.md); the harness and measurement caveats remain
+in [automation/README.md](../automation/README.md). The
+[pre-Kubernetes assessment](pre-kubernetes.md) remains archived context, not a
+new backlog or evidence of current gaps.
+
+The following broader scope remains deferred; the register frames decisions
+without silently promoting these items to implementation:
 
 - **Phase B:** target population and `prod1`/`prod2` continuity topology are
   recorded; hosting/control-plane ownership, management placement/isolation,
