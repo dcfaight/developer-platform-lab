@@ -873,3 +873,22 @@ The three exact catalog image references were also imported and verified in the
 disposable node's containerd store. For the containerized K3s validation node,
 the CLI was `ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io`
 instead of the host installation's `k3s ctr` wrapper.
+
+Additional validation for this increment:
+
+- Full automation discovery with `PLATFORM_GITOPS_ARTIFACTS=/tmp`: **94 tests,
+  no failures, nine opt-in tests skipped**.
+- GitOps-specific checks with artifact verification and live RBAC enabled:
+  **12 tests, no failures, only the end-to-end Git rollback drill skipped**.
+  Both controller/server identities were denied namespace/PVC/Deployment deletion,
+  platform Secret reads, cluster RBAC creation and environment-namespace writes.
+- Bootstrap and digest-pinned target: **server-side dry-run passed** after the
+  prerequisite namespace existed. All three OCI image imports passed.
+- Frontend: **134 tests passed**, lint and production build passed.
+- Backend Maven `verify`: **141 tests, no failures, five kind-gated tests skipped**.
+- Secret scanning: no secrets found. CodeQL Python analysis: zero alerts.
+  The automated model-based review was unavailable; a separate read-only code
+  review completed with no significant findings.
+
+These results validate packaging, artifact identity and permission boundaries;
+they do not replace the blocked controller synchronization/rollback drill.
