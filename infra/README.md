@@ -613,11 +613,151 @@ backup recovery.
   service-account token. Only the backend receives the explicit worker projection.
   PostgreSQL retains its image's initialization privileges. These are
   useful defaults, not validated production hardening.
-- **TODO:** test backup/restore and restart persistence on K3s; run the automated
+- A separate [disposable logical backup/restore drill](#disposable-k3s-logical-backuprestore)
+  is available; it does not test the live PVC or restart persistence.
+- **TODO:** retain successful logical restore evidence and test live restart
+  persistence on K3s; run the automated
   authenticated lifecycle check separately from the recorded manual validation;
   add network policies, database role separation, secret encryption/rotation,
   certificate renewal and access review.
   No expiration scheduler or cleanup-CLI TLS extension is included.
+
+## Disposable K3s logical backup/restore
+
+### Safety and prerequisites
+
+This **operator-invoked logical round trip**, not a backup service, requires
+Python 3.12, `kubectl`, and an explicitly selected **disposable K3s cluster**.
+Do not use a production/shared context. The operator needs permission to create
+namespaces, NetworkPolicies and pods, exec into those pods, and delete the
+drill-owned namespace. No application/API credentials are needed.
+
+Build the backend from this checkout and import it into **every schedulable
+node's containerd store** as `platform-lab-backend:k3s-v2`, following the earlier
+K3s image preparation instructions. The drill uses `imagePullPolicy: Never` for
+this local image; an older image lacking this checkout's migrations fails
+verification. Nodes must also have access to `postgres:18.6`. Neither the
+application stack nor Argo CD needs to be installed. Default K3s network-policy
+enforcement must be enabled.
+
+The workflow creates a random `backup-drill-…` namespace, a deny-all
+ingress/egress NetworkPolicy, and two standalone PostgreSQL pods. Each has its
+own fresh, size-bounded `emptyDir`; **no PVC, PV, Service, application Secret,
+worker RBAC, live database connection, or existing deployment is used or
+modified**. PostgreSQL listens only on loopback. A backend container in the
+source pod applies the real Flyway migrations over loopback, with the deploy
+profile and worker explicitly disabled; its HTTP listener is also loopback-only.
+The restore pod contains PostgreSQL only. Both pods have service-account token
+automount disabled. Restored pending operations cannot reach a provisioning
+worker.
+
+### Run and retain evidence
+
+Set `ROOT` to the absolute path of your checkout. Create an access-controlled
+artifact directory **outside it**, on operator-managed storage (or copy results
+to durable storage before a temporary host expires):
+
+```sh
+ROOT=/home/runner/work/developer-platform-lab/developer-platform-lab
+ARTIFACTS="$(mktemp -d /tmp/platform-logical-restore.XXXXXX)"
+chmod 700 "$ARTIFACTS"
+K3S_CONTEXT=your-disposable-k3s-context
+kubectl --context "$K3S_CONTEXT" get nodes
+
+PLATFORM_BACKUP_RESTORE_TEST=true python3 "$ROOT/automation/backup_restore.py" \
+  --confirm-disposable --context "$K3S_CONTEXT" --artifacts "$ARTIFACTS"
+```
+
+**Both** the exact environment opt-in and `--confirm-disposable` are required;
+omitting either refuses before Kubernetes access. The context and artifact
+directory must be explicit. Normal CI only runs offline safety checks.
+Alternatively, run the dedicated live unittest workflow:
+
+```sh
+PLATFORM_BACKUP_RESTORE_TEST=true \
+PLATFORM_K3S_CONTEXT="$K3S_CONTEXT" \
+PLATFORM_BACKUP_RESTORE_ARTIFACTS="$ARTIFACTS" \
+  python3 -m unittest discover -s "$ROOT/automation/tests" -p test_backup_restore.py -v
+```
+
+The fixture has two environments, linked pending create operations, audit and
+progress events, team memberships, and the **same idempotency key in two
+actor/team scopes**. The drill validates known fixture values and relationships,
+then uses PostgreSQL 18 `pg_dump --format=custom` and `pg_restore` into the empty
+restore database. It compares every column in all fixture tables and Flyway
+history (including checksums/success), schema DDL, and sequence value/called state.
+For schema comparison, PostgreSQL itself parses the source DDL into a fresh
+schema-only `schema_reference` database inside the disposable source pod. This
+normalizes PostgreSQL's equivalent array-cast rendering on logical restore
+without custom SQL rewriting; the source fixture database is not reconfigured.
+No migrations or backend process run against the restored database.
+
+Each run prints a new mode-0700 directory containing:
+
+- `fixture.dump` (mode 0600): the logical backup, not raw database storage.
+- `fixture.dump.sha256`: SHA-256 of that artifact.
+- `source-schema.sql` and `restore-schema.sql` (mode 0600): server-normalized
+  source DDL and restored DDL for inspecting schema verification, without fixture rows.
+- `evidence.json` (mode 0600): pass/fail and failed stage, explicit context,
+  namespace/pod UIDs, database identities, configured/runtime images,
+  Kubernetes/PostgreSQL versions, checksum, per-table/schema/sequence verification
+  results (including false comparisons on mismatch), and measured backup/restore
+  command durations in seconds.
+
+Evidence contains no passwords, SQL rows, kubeconfig, or raw error bodies.
+Context/resource identities can still be internal metadata: review before sharing.
+Retain the backup, checksum and evidence together securely; do not commit them.
+Verify the retained artifact with `sha256sum -c fixture.dump.sha256` from its run
+directory. Success requires exit zero, `status: passed`, every verification true,
+and `cleanup: deleted-owned-namespace`. Durations are observations for this tiny
+fixture, **not production RTO**.
+
+### Failure handling, cleanup, and limits
+
+Kubernetes requests have a 15-second request timeout; commands normally have a
+60-second subprocess bound, pod readiness 180 seconds, backup/restore 120
+seconds each, and cleanup waits at most 90 seconds. Pods have a 900-second active
+deadline and bounded CPU/memory/storage; the disposable source backend allows
+60 seconds for initial database-pool connection acquisition. Failure or Ctrl-C attempts cleanup and
+retains sanitized stage evidence and any partial backup. A failed/partial dump
+is not recovery evidence.
+
+Cleanup deletes **only the generated namespace**, after matching its ownership
+label and recorded UID, with a UID deletion precondition; it never runs a broad
+label deletion or applies/deletes the live Kustomization. On cleanup failure,
+abrupt host loss/SIGKILL, or an ambiguous namespace-create timeout, inspect the
+exact generated namespace and its ownership/UID before removing it. Do not
+force-delete resources or finalizers, delete `platform-lab`, or delete any PVC.
+After externally archiving evidence, the operator chooses when to remove the
+local run directory; artifacts are not automatically deleted.
+
+A passing run proves a **quiescent known-fixture logical backup/restore round
+trip at one schema/PostgreSQL version** into independent disposable storage.
+It does **not** prove backup of live application data, live PVC/restart
+persistence, retention/off-cluster durability, arbitrary migration rollback,
+concurrent-write consistency, full-role/global-object recovery, node-loss
+recovery, PITR, HA, replication, failover, production RPO/RTO or production
+recovery readiness. Scheduling, production backup storage/retention, recovery
+objectives and capacity testing remain future work.
+
+**2026-10-17 validation:** automation discovery passed **111 tests, 11 opt-in
+checks skipped**; the dedicated opt-in unittest workflow subsequently passed
+**all 17 tests with no skips**. The standalone live drill passed on disposable K3s
+`v1.35.1+k3s1` with PostgreSQL `18.6`: all fixture/Flyway/schema/sequence checks
+passed, with backup **0.207 s** and restore **0.216 s**. The retained dump's SHA-256
+is `f5b2485d5353db839290f922e0876c42d0b30d6df85ec022189c3ab3d6029749`;
+its checksum and the matching schema files were independently checked. A
+missing-backend-image attempt also failed within the readiness bound and cleaned
+its owned namespace. Neither run used any live application database or PVC.
+
+Artifacts/evidence are at
+`/tmp/platform-backup-validation/backup-drill-nwa9agpk` **in this task environment
+only**, not durable publication. Archive that run directory externally before
+the environment expires, or repeat the runbook on the intended disposable target.
+Durably retained target-cluster evidence is still required before closing the
+logical restore validation gate; these tiny-fixture timings are not RPO/RTO.
+The separate GitOps synchronization/rollback live-validation blocker below
+remains open; this drill does not resolve it.
 
 ## Disposable K3s GitOps deployment and frontend rollback
 
