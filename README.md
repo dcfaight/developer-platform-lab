@@ -31,6 +31,7 @@ and its proposed execution sequence.
 | Current status, evidence gates, open decisions, and proposed priorities | [Operating Model and Delivery Sequence](docs/operating-model-and-sequence.md) |
 | Local request → provision → observe → delete walkthrough | [Demo and troubleshooting](docs/demo.md) |
 | kind, Compose, K3s, GitOps, and operational drill instructions/evidence | [Infrastructure guide](infra/README.md) |
+| Optional read-only visual cluster checks | [FreeLens operator checklist](docs/runbooks/freelens-operator-checklist.md) |
 | Cleanup, logical restore, and capacity tooling | [Automation guide](automation/README.md) |
 | API contract | [API reference](docs/api.md) |
 | Accepted architecture decisions | [Decision records](docs/decisions/) |
