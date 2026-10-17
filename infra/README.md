@@ -87,6 +87,26 @@ sharing, or hostile workloads. The worker's existing cluster-scoped
 namespace `get/create/delete` permissions remain a separate, documented
 limitation; use only the dedicated disposable cluster described here.
 
+### Validation evidence for this increment
+
+- `cd backend && ./mvnw --batch-mode verify`: passed, 125 tests with no failures;
+  five kind-gated tests were skipped because the opt-in variable was unset.
+- `cd backend && PLATFORM_KIND_TEST=true ./mvnw --batch-mode -Dtest=KindProvisioningTests#resourceQuotaRejectsAnOverBudgetPodOnDisposableKind test`:
+  passed against the dedicated local kind cluster, verifying both LimitRange
+  defaults and API rejection of an over-budget Pod.
+- `python3 -m unittest discover -s automation/tests -v`: passed, 80 tests;
+  seven opt-in deployment/K3s tests were skipped because no target was selected.
+- `kubectl kustomize infra/kubernetes`: passed.
+
+The broader `PLATFORM_KIND_TEST=true ./mvnw --batch-mode
+-Dtest=KindProvisioningTests,KindWorkerFlowTests test` run did not pass in this
+local environment: one existing sample readiness check timed out after 120
+seconds, and the worker flow remained `WAITING`. The disposable cluster showed
+repeated sample HTTP probe timeouts and non-ready CoreDNS/local-path pods. The
+direct quota/LimitRange test passed independently; real-kind lifecycle readiness
+and live K3s behavior remain unverified. The test cluster was deleted after
+validation. Frontend tests were not run because frontend code was unchanged.
+
 ## Hardened single-host deployment (API-only)
 
 This is a separate, opt-in Compose project, not an overlay on the developer
