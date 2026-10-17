@@ -1,5 +1,11 @@
 # Infrastructure
 
+This is the operational runbook and historical evidence layer. For current
+status, remaining work, and blockers, start with the
+[canonical roadmap table](../docs/operating-model-and-sequence.md#current-delivery-gates).
+Record new validation outcomes there with links to retained evidence; dated
+results below do not close other gates.
+
 ## Local kind development cluster
 
 `kind/cluster.yaml` defines a dedicated, single-node local development cluster.
