@@ -18,7 +18,8 @@ required `Idempotency-Key` header:
 {
   "name": "demo",
   "templateId": "sample-service",
-  "ttlHours": 8
+  "ttlHours": 8,
+  "teamId": "payments"
 }
 ```
 
@@ -27,6 +28,7 @@ required `Idempotency-Key` header:
 | `name` | Required string; trim surrounding whitespace before validation and persistence. The resulting name is 1–63 ASCII letters, digits, spaces, underscores, or hyphens, starting with a letter or digit: `[A-Za-z0-9][A-Za-z0-9 _-]{0,62}`. |
 | `templateId` | Required string, exactly `sample-service`. |
 | `ttlHours` | Optional JSON integer, defaults to `8` when omitted or `null`; inclusive range `1`–`24`. Fractional numbers are rejected. |
+| `teamId` | Lower-case slug, 1–63 characters, naming an existing `platform_teams` row. Required for `DEVELOPER` and must be one of the caller's memberships; missing, unknown or nonmember teams return `403 FORBIDDEN`. Optional for `OPERATOR`; omission keeps compatibility by creating an unowned, operator-managed environment. |
 | `Idempotency-Key` | Required; matches `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`. |
 
 Unknown JSON fields are rejected. A successful request returns `202 Accepted`,
@@ -49,7 +51,9 @@ Deployment/image by the worker. No arbitrary manifests or images are accepted.
 
 ### Durable idempotency and atomicity
 
-The normalized name, exact template ID, and effective TTL identify the request.
+New reservations are scoped by authenticated caller and team (including the
+operator's unowned scope), rather than a global key. The normalized name, exact
+template ID, effective TTL, and team identify the request.
 For example, `" demo "` and `"demo"` are equivalent, as are omitting TTL,
 sending `null`, and explicitly sending `8`. Reusing the same key for equivalent input returns the
 original `202` body and `Location`, including the original IDs and accepted
@@ -64,6 +68,16 @@ environment and operation IDs immediately. Its foreign keys are
 the environment, operation, and audit event are written; no reservation
 completion update is needed. These writes commit or roll back together. Concurrent
 requests using one key cannot create duplicate environments or operations.
+Different callers or team scopes can independently use the same key. Legacy
+global reservations remain replay-compatible for `OPERATOR` only; developers
+cannot replay them to discover or claim legacy environments. Replays still
+require current authorization; membership removal is not bypassed by an old key.
+
+**V7 deployment compatibility:** V7 changes the idempotency primary key from
+`key` to `(scope, key)`. Stop all old backend processes before starting the
+upgraded backend and its Flyway migrations. This is not a mixed-version rolling
+migration: the old backend's `ON CONFLICT (key)` no longer works after V7.
+Existing environment, operation, idempotency and audit rows remain intact.
 
 ## Delete an environment
 
@@ -102,7 +116,7 @@ backend clock (`400 INVALID_REQUEST`). Under the same environment row lock, a
 this guarded route, even if another deletion fails between the client's recheck
 and submission. The unguarded portal/manual retry contract is unchanged.
 
-The CLI never retries DELETE; ambiguous responses trigger bounded detail reads
+The CLI never retries DELETE; ambiguous responses trigger bounded authenticated detail reads
 to recover the operation ID or report a failure/unknown outcome. Use operation
 detail/history to verify completion; a 202 only requests deletion. The CLI
 requires this backend revision so the guard is enforced.
@@ -126,7 +140,9 @@ Ownership conflicts discovered in Kubernetes are asynchronous operation failures
 not a claim that request acceptance validated live cluster ownership. These checks
 protect platform resources; they are separate from the user
 [authorization](#authentication-and-authorization) that DELETE requires.
-Any `OPERATOR` may delete any environment; there is no per-owner policy. Deletion removes the namespace and everything
+Any `OPERATOR` may delete any environment. A `DEVELOPER` may delete only an
+environment owned by one of their current teams; unowned legacy environments
+are operator-managed. Deletion removes the namespace and everything
 inside it, not the PostgreSQL environment or operation history.
 
 ## Read environments
@@ -159,6 +175,8 @@ run-wide snapshot completeness. A valid page beyond the last page returns an emp
   "name": "demo",
   "namespace": "env-99f42e18bab940ad83d185bc3f6378c0",
   "templateId": "sample-service",
+  "teamId": "payments",
+  "createdBy": "alice",
   "status": "REQUESTED",
   "expiresAt": "2026-10-16T13:00:00Z",
   "createdAt": "2026-10-16T05:00:00Z",
@@ -346,7 +364,7 @@ and are the same on every replica, whether or not that replica runs the worker:
 | `worker.lastEventAt` | Most recent operation event; a coarse worker activity signal. |
 | `failureCodes` | Terminal `FAILED` operation counts by sanitized failure code (top 20). |
 
-Like the other reads, this route is anonymous (trusted-local) and exposes no
+This route requires HTTP Basic authentication with `OPERATOR` and exposes no
 environment names, lease tokens, or credentials.
 
 Both detail routes require UUID identifiers. A malformed identifier returns
@@ -398,19 +416,31 @@ credentials are never sent ambiently by the browser.
 
 | Request | Requirement |
 |---|---|
-| `GET`/`HEAD` reads under `/api/v1` (lists, detail, operations) | None (anonymous, trusted-local) |
-| `GET /api/v1/me` | Any authenticated account; returns `{"username":"alice","roles":["OPERATOR"]}` |
-| `POST /api/v1/environments` | Role `OPERATOR` |
-| `DELETE /api/v1/environments/{id}` | Role `OPERATOR` |
-| `DELETE /api/v1/environments/{id}?expiredBefore=…` | Role `OPERATOR` or `CLEANUP` |
+| Health probes (`/actuator/health/liveness`, `/actuator/health/readiness`) | Anonymous; deployment exposure remains unchanged |
+| `GET /api/v1/me` | Any authenticated account; returns `{"username":"alice","roles":["DEVELOPER"],"teams":["payments"]}` |
+| Environment list/detail discovery | `OPERATOR`: all; `DEVELOPER`: only owned-team environments (including list rows and totals); `CLEANUP`: all, including legacy unowned rows |
+| Environment operation history and direct operation reads | `OPERATOR`: all; `DEVELOPER`: only environments owned by their teams; `CLEANUP`: denied |
+| `GET /api/v1/operations/metrics` | `OPERATOR` only |
+| `POST /api/v1/environments` | `OPERATOR`: optional explicit team owner, otherwise unowned; `DEVELOPER`: explicit member `teamId`; `CLEANUP`: denied |
+| `DELETE /api/v1/environments/{id}` | `OPERATOR`: all; `DEVELOPER`: owned teams only; `CLEANUP`: denied |
+| `DELETE /api/v1/environments/{id}?expiredBefore=…` | `OPERATOR`: all; `DEVELOPER`: owned teams only; `CLEANUP`: all, subject to the expiry/state guard |
 | Any other method or path | Role `OPERATOR` (fail closed) |
 
-Rejections happen before validation, idempotency reservation, or any write:
+All API reads (including list, detail, history and operation reads) require Basic
+credentials; there is no anonymous API read path. `HEAD` must not bypass the same
+authorization. `CLEANUP` is an exclusive automation role and cannot be combined
+with `OPERATOR` or `DEVELOPER`; it is not a portal or diagnostic-reader role.
+Teams authorize the persisted owner, not `createdBy` or a caller-supplied actor.
+Environment DTOs add `teamId` and `createdBy`; both may be `null` for legacy rows.
+There is no ownership transfer or automatic legacy adoption.
+
+Authentication/authorization rejection consumes no idempotency reservation and
+performs no mutation:
 
 | Status | Code | Meaning |
 |---|---|---|
 | `401` | `UNAUTHENTICATED` | Missing, malformed, or wrong credentials. |
-| `403` | `FORBIDDEN` | Valid credentials without the required role. |
+| `403` | `FORBIDDEN` | Valid credentials without the required role or team access. |
 
 Both use the standard error body with `requestId` and the `X-Request-Id` header.
 `401` deliberately omits `WWW-Authenticate`, so browsers never show a native
@@ -422,8 +452,33 @@ requests (including cleanup-CLI deletions, recorded as the `CLEANUP` account).
 Earlier rows keep `local-development`, which can no longer be configured as a
 username. Request completion logs do not record the actor.
 
-Not provided: TLS (plain Basic is acceptable only on loopback), SSO/OIDC, token
-expiry, rate limiting or lockout, runtime account management, read
-authorization, ownership/team-based authorization, or per-user idempotency
-namespaces (keys are global; another operator's replay returns the original
-acceptance without a new audit event).
+### Trusted team provisioning
+
+Passwords and roles remain in the existing account configuration, now also
+accepting `DEVELOPER`. Do not add team fields to account configuration. Membership
+is stored in PostgreSQL `platform_teams(id varchar(63))` and
+`account_team_memberships(username varchar(64), team_id REFERENCES platform_teams(id))`.
+Team IDs are constrained to lower-case slugs of 1–63 characters.
+Provision it only through a trusted SQL administrator, for example:
+
+```sql
+BEGIN;
+INSERT INTO platform_teams (id) VALUES ('payments') ON CONFLICT DO NOTHING;
+INSERT INTO account_team_memberships (username, team_id)
+VALUES ('alice', 'payments') ON CONFLICT DO NOTHING;
+COMMIT;
+```
+
+`alice` must separately be a configured account with role `DEVELOPER`. Membership
+usernames **must match the configured account username spelling exactly**. Basic
+lookup may be case-insensitive, but returns the canonical configured spelling;
+database membership equality is exact. Use that spelling in trusted SQL rather
+than independently normalizing it. `/me`
+reports current memberships; revoking membership removes access to that team's
+environments, including history, operations and idempotent replay. No team or
+membership management API is added.
+
+Not provided: SSO/OIDC, token expiry, rate limiting or lockout, runtime account
+management, GitOps, ownership transfer, or production multi-tenant hardening.
+Plain Basic is acceptable only on loopback; use the separate TLS deployment
+path for container access. Kubernetes RBAC and ingress are unchanged.

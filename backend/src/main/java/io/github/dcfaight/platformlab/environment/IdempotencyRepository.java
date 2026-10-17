@@ -12,19 +12,19 @@ public class IdempotencyRepository {
         this.jdbc = jdbc;
     }
 
-    public boolean reserve(String key, CreateEnvironmentRequest request, UUID environmentId, UUID operationId) {
+    public boolean reserve(String scope, String key, CreateEnvironmentRequest request, UUID environmentId, UUID operationId) {
         // PostgreSQL waits for a competing transaction; rollback allows this request to become the winner.
         return jdbc.update("""
-                INSERT INTO idempotency_requests (key, name, template_id, ttl_hours, environment_id, operation_id)
-                VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (key) DO NOTHING
-                """, key, request.name(), request.templateId(), request.ttlHours(), environmentId, operationId) == 1;
+                INSERT INTO idempotency_requests (scope, key, name, template_id, ttl_hours, environment_id, operation_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (scope, key) DO NOTHING
+                """, scope, key, request.name(), request.templateId(), request.ttlHours(), environmentId, operationId) == 1;
     }
 
-    public IdempotencyRecord find(String key) {
-        return jdbc.queryForObject("SELECT * FROM idempotency_requests WHERE key = ?",
+    public java.util.Optional<IdempotencyRecord> find(String scope, String key) {
+        return jdbc.query("SELECT * FROM idempotency_requests WHERE scope = ? AND key = ?",
                 (rs, row) -> new IdempotencyRecord(rs.getString("name"), rs.getString("template_id"),
                         rs.getInt("ttl_hours"), rs.getObject("environment_id", UUID.class),
-                        rs.getObject("operation_id", UUID.class)), key);
+                        rs.getObject("operation_id", UUID.class)), scope, key).stream().findFirst();
     }
 
     public record IdempotencyRecord(String name, String templateId, int ttlHours,

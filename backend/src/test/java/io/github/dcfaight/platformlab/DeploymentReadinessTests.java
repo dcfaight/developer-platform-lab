@@ -38,6 +38,7 @@ class DeploymentReadinessTests {
         registry.add("DB_URL", POSTGRES::getJdbcUrl);
         registry.add("DB_USERNAME", POSTGRES::getUsername);
         registry.add("DB_PASSWORD", POSTGRES::getPassword);
+        io.github.dcfaight.platformlab.security.TestUsers.register(registry);
     }
 
     @LocalServerPort
@@ -70,7 +71,12 @@ class DeploymentReadinessTests {
     }
 
     private HttpResponse<String> get(String path) throws Exception {
-        return HTTP.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
-                .timeout(Duration.ofSeconds(10)).GET().build(), HttpResponse.BodyHandlers.ofString());
+        var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                .timeout(Duration.ofSeconds(10));
+        if (path.startsWith("/api/")) {
+            request.header("Authorization", io.github.dcfaight.platformlab.security.TestUsers.basic(
+                    io.github.dcfaight.platformlab.security.TestUsers.OPERATOR));
+        }
+        return HTTP.send(request.GET().build(), HttpResponse.BodyHandlers.ofString());
     }
 }

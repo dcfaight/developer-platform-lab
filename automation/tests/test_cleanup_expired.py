@@ -463,6 +463,21 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(result["requested"], 1)
         self.assertEqual(result["acceptedOperations"][0]["environmentId"], OTHER)
 
+    def test_recheck_and_recovery_use_per_id_detail_not_full_list_scans(self):
+        client = FakeClient([
+            page([item()], size=1),
+            item(),
+            recovering(),
+        ], [cleanup.Failure("TRANSPORT_ERROR")])
+        result = self.run_cleanup(client, "--execute", "--page-size", "1")
+        self.assertEqual(result["alreadyDeleting"], 1)
+        self.assertEqual(result["exitStatus"], 0)
+        self.assertEqual([call for call in client.calls if call[0] == "GET"], [
+            ("GET", "/environments?page=0&size=1"),
+            ("GET", "/environments/" + IDENTITY),
+            ("GET", "/environments/" + IDENTITY),
+        ])
+
     def test_ambiguous_delete_recovers_operation_and_never_resubmits(self):
         for failure in (
             cleanup.Failure("NOT_FOUND", 404),
@@ -679,15 +694,20 @@ class CredentialTests(unittest.TestCase):
                     cleanup.basic_authorization(environ)
                 self.assertNotIn(CLEANUP_PASSWORD, str(raised.exception))
 
-    def test_execute_requires_credentials_before_any_network(self):
-        with patch.object(cleanup.Client, "__init__", side_effect=AssertionError("network")):
-            with patch("sys.stderr"):
-                self.assertEqual(cleanup.main(["--execute"], environ={}), 2)
+    def test_both_modes_require_credentials_before_any_network(self):
+        for flags in ([], ["--dry-run"], ["--execute"]):
+            with self.subTest(flags=flags):
+                with patch.object(cleanup.Client, "__init__", side_effect=AssertionError("network")):
+                    with patch("sys.stderr"):
+                        self.assertEqual(cleanup.main(flags, environ={}), 2)
 
-    def test_delete_alone_carries_authorization(self):
+    def test_list_detail_and_delete_carry_authorization(self):
         client = cleanup.Client(cleanup.arguments(["--execute"]), EXPECTED_AUTHORIZATION)
         for method, path, expected in (
-            ("GET", "/environments", {"Accept": "application/json"}),
+            ("GET", "/environments",
+             {"Accept": "application/json", "Authorization": EXPECTED_AUTHORIZATION}),
+            ("GET", "/environments/" + IDENTITY,
+             {"Accept": "application/json", "Authorization": EXPECTED_AUTHORIZATION}),
             ("DELETE", "/environments/" + IDENTITY,
              {"Accept": "application/json", "Authorization": EXPECTED_AUTHORIZATION}),
         ):
@@ -828,18 +848,22 @@ class HttpCliTests(unittest.TestCase):
                 with http_server(lambda handler, n: (
                     200, page([item(expires="2000-01-01T00:00:00Z")]), {}
                 )) as (url, requests):
-                    # Dry-run is read-only and needs no credentials.
-                    result = self.summary(self.cli(url, *flags, credentials={}))
+                    result = self.summary(self.cli(url, *flags))
                 self.assertEqual(result["mode"], "dry-run")
                 self.assertEqual(result["selectedIds"], [IDENTITY])
                 self.assertEqual([(method, path) for method, path, _ in requests], [
                     ("GET", "/api/v1/environments?page=0&size=20"),
                 ])
                 self.assertEqual(requests[0][2]["Accept"], "application/json")
-                self.assertNotIn("Authorization", requests[0][2])
+                self.assertEqual(requests[0][2]["Authorization"], EXPECTED_AUTHORIZATION)
 
     def test_subprocess_execute_rechecks_and_sends_atomic_expiry_query(self):
         def responder(handler, number):
+            if handler.headers.get("Authorization") != EXPECTED_AUTHORIZATION:
+                return 401, {"code": "UNAUTHENTICATED"}, {}
+            if handler.command == "GET" and urlsplit(handler.path).path not in {
+                    "/api/v1/environments", "/api/v1/environments/" + IDENTITY}:
+                return 403, {"code": "FORBIDDEN"}, {}
             if number == 1:
                 return 200, page([item(expires="2000-01-01T00:00:00Z")]), {}
             if handler.command == "GET":
@@ -857,8 +881,8 @@ class HttpCliTests(unittest.TestCase):
         self.assertEqual(result["acceptedOperations"], [{
             "environmentId": IDENTITY, "operationId": OPERATION, "source": "202",
         }])
-        self.assertNotIn("Authorization", requests[0][2])
-        self.assertNotIn("Authorization", requests[1][2])
+        self.assertEqual(requests[0][2]["Authorization"], EXPECTED_AUTHORIZATION)
+        self.assertEqual(requests[1][2]["Authorization"], EXPECTED_AUTHORIZATION)
         self.assertEqual(requests[2][2]["Authorization"], EXPECTED_AUTHORIZATION)
         self.assertNotIn(CLEANUP_PASSWORD, json.dumps(result))
 
@@ -879,6 +903,18 @@ class HttpCliTests(unittest.TestCase):
                 self.assertNotIn(CLEANUP_PASSWORD, process.stderr)
                 self.assertNotIn("Traceback", process.stderr)
                 self.assertEqual(requests, [])
+
+    def test_subprocess_dry_run_requires_credentials_and_auth_errors_are_not_retried(self):
+        with http_server(lambda handler, n: (200, page([]), {})) as (url, requests):
+            process = self.cli(url, "--dry-run", credentials={})
+        self.assertEqual(process.returncode, 2)
+        self.assertEqual(requests, [])
+        for status, code in ((401, "UNAUTHENTICATED"), (403, "FORBIDDEN")):
+            with self.subTest(status=status):
+                with http_server(lambda handler, n: (status, {"code": code}, {})) as (url, requests):
+                    result = self.summary(self.cli(url, "--dry-run"), 1)
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(result["errors"], [{"code": code, "httpStatus": status}])
 
     def test_subprocess_rejected_credentials_fail_without_retrying_delete(self):
         for status, code in ((401, "UNAUTHENTICATED"), (403, "FORBIDDEN")):
@@ -1244,6 +1280,7 @@ class HttpCliTests(unittest.TestCase):
             process = subprocess.run(
                 [sys.executable, str(SCRIPT), "--api-base-url", url],
                 capture_output=True, text=True, timeout=6, check=False,
+                env={**os.environ, **CREDENTIALS},
             )
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertEqual(process.stderr, "")

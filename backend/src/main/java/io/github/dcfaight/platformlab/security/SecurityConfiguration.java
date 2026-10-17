@@ -37,7 +37,7 @@ import tools.jackson.databind.ObjectMapper;
 
 /**
  * First authentication/authorization boundary: stateless HTTP Basic against locally
- * configured, hashed accounts. Mutations require a role; reads stay trusted-local.
+ * configured, hashed accounts. API data requires role and team authorization.
  */
 @Configuration
 @EnableConfigurationProperties(PlatformSecurityProperties.class)
@@ -76,11 +76,19 @@ public class SecurityConfiguration {
                                 paths.matcher(HttpMethod.GET, "/actuator/health/readiness")).permitAll()
                         .requestMatchers(paths.matcher(HttpMethod.GET, "/api/v1/me")).authenticated()
                         .requestMatchers(paths.matcher(HttpMethod.POST, "/api/v1/environments"))
-                        .hasRole(Role.OPERATOR.name())
-                        .requestMatchers(guardedDelete).hasAnyRole(Role.OPERATOR.name(), Role.CLEANUP.name())
-                        .requestMatchers(deleteEnvironment).hasRole(Role.OPERATOR.name())
-                        .requestMatchers(paths.matcher(HttpMethod.GET, "/api/v1/**")).permitAll()
-                        .requestMatchers(paths.matcher(HttpMethod.HEAD, "/api/v1/**")).permitAll()
+                        .hasAnyRole(Role.OPERATOR.name(), Role.DEVELOPER.name())
+                        .requestMatchers(guardedDelete).hasAnyRole(Role.OPERATOR.name(), Role.DEVELOPER.name(),
+                                Role.CLEANUP.name())
+                        .requestMatchers(deleteEnvironment).hasAnyRole(Role.OPERATOR.name(), Role.DEVELOPER.name())
+                        .requestMatchers(paths.matcher("/api/v1/operations/metrics")).hasRole(Role.OPERATOR.name())
+                        .requestMatchers(paths.matcher(HttpMethod.GET, "/api/v1/environments"),
+                                paths.matcher(HttpMethod.HEAD, "/api/v1/environments"),
+                                paths.matcher(HttpMethod.GET, "/api/v1/environments/*"),
+                                paths.matcher(HttpMethod.HEAD, "/api/v1/environments/*"))
+                        .hasAnyRole(Role.OPERATOR.name(), Role.DEVELOPER.name(), Role.CLEANUP.name())
+                        .requestMatchers(paths.matcher(HttpMethod.GET, "/api/v1/**"),
+                                paths.matcher(HttpMethod.HEAD, "/api/v1/**"))
+                        .hasAnyRole(Role.OPERATOR.name(), Role.DEVELOPER.name())
                         // Fail closed: any other method or path requires the strongest role.
                         .anyRequest().hasRole(Role.OPERATOR.name()))
                 .build();

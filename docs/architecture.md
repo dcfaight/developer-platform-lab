@@ -30,9 +30,18 @@ and consumes environment lists, details, and operation history through the Vite
 development proxy; it holds no Kubernetes credentials. The manually invoked
 Python expiration CLI defaults to dry-run and uses the same delete API, with a
 row-locked cutoff/state guard preventing terminal-failure retries. It has no SQL
-or Kubernetes access. Mutations require stateless HTTP Basic credentials for
-statically configured accounts (`OPERATOR` creates/deletes; `CLEANUP` may only
-send expiry-guarded deletes), and audit events record the authenticated username;
-reads remain anonymous and trusted-local. There is no expiration scheduler, periodic
-post-success health reconciliation, SSO, or production RBAC. Namespace ownership is
-a resource-safety check, not a user identity or access policy.
+or Kubernetes access. All API reads and writes require stateless HTTP Basic
+credentials. `OPERATOR` has platform-wide read/create/delete access; `DEVELOPER`
+can read/delete only team-owned environments and must specify a member `teamId`
+on creation. Operators may leave creation unowned for compatibility; legacy rows
+stay operator-managed. Exclusive `CLEANUP` accounts can discover all environments
+through list/detail reads and send expiry-guarded deletes, but cannot read
+operation history/direct operations or metrics.
+Metrics are operator-only; health probes remain anonymous. Audit events record
+the authenticated username, and new idempotency reservations are caller/team-scoped.
+Trusted SQL administrators provision `platform_teams` and
+`account_team_memberships`; passwords/roles remain in account configuration.
+There is no expiration scheduler, periodic post-success health reconciliation,
+SSO, GitOps, ownership transfer, or production tenant isolation. Namespace
+ownership remains a resource-safety check, separate from team authorization;
+worker RBAC and ingress are unchanged.

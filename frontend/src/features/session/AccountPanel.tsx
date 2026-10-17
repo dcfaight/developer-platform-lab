@@ -1,13 +1,14 @@
 import { useState, type FormEvent } from 'react'
 import { ApiError, signIn } from '../../api/client'
-import { clearSession, useSession } from '../../api/session'
+import { clearSession, useSession, useSessionVersion } from '../../api/session'
 
 export function AccountPanel() {
   const session = useSession()
+  const version = useSessionVersion()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<ApiError>()
+  const [error, setError] = useState<{ version: number, failure: ApiError }>()
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -18,7 +19,9 @@ export function AccountPanel() {
       await signIn(username.trim(), password)
       setUsername('')
     } catch (failure) {
-      setError(failure instanceof ApiError ? failure : new ApiError('Sign-in could not be completed.'))
+      if (failure instanceof ApiError && failure.code !== 'SESSION_CHANGED') {
+        setError({ version: version + 1, failure })
+      }
     } finally {
       setPassword('')
       setBusy(false)
@@ -29,13 +32,15 @@ export function AccountPanel() {
     return <section className="panel account-panel" aria-label="Account">
       <p>Signed in as <strong>{session.identity.username}</strong>
         {' '}({session.identity.roles.join(', ') || 'no roles'}).
+        {' '}Teams: {session.identity.teams.join(', ') || 'none'}.
         {' '}Credentials are kept only in this tab's memory; reloading signs you out.</p>
       <button type="button" onClick={clearSession}>Sign out</button>
     </section>
   }
 
   return <section className="panel account-panel" aria-label="Account">
-    <p>Browsing is open on this trusted local portal. Creating and deleting environments requires an OPERATOR sign-in.</p>
+    <p>Sign in to browse this trusted local portal. DEVELOPER accounts manage their teams' environments;
+      OPERATOR accounts manage all environments. CLEANUP accounts have read-only portal access.</p>
     <form onSubmit={(event) => { void submit(event) }} aria-busy={busy}>
       <div className="form-field">
         <label htmlFor="account-username">Username</label>
@@ -49,7 +54,7 @@ export function AccountPanel() {
       </div>
       <button type="submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
     </form>
-    {error && <p role="alert" className="submission-message">{error.message}
-      {error.requestId && <> Request ID: <code>{error.requestId}</code></>}</p>}
+    {error?.version === version && <p role="alert" className="submission-message">{error.failure.message}
+      {error.failure.requestId && <> Request ID: <code>{error.failure.requestId}</code></>}</p>}
   </section>
 }

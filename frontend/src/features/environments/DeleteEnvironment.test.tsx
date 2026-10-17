@@ -211,28 +211,50 @@ describe('safe environment deletion', () => {
 })
 
 describe('deletion authorization', () => {
-  it('disables deletion until an operator is signed in', async () => {
-    setSession(null)
+  it('disables deletion for a read-only cleanup account', async () => {
+    setSession({ ...operatorSession, identity: { username: 'cleanup-bot', roles: ['CLEANUP'], teams: [] } })
     const fetchMock = portal()
     render(<EnvironmentDetail id={ready.id} />)
     const button = await screen.findByRole('button', { name: 'Delete environment' })
     expect(button).toHaveProperty('disabled', true)
-    expect(screen.getByText(/Requires an OPERATOR sign-in/)).toBeTruthy()
+    expect(screen.getByText(/Requires a team DEVELOPER or OPERATOR sign-in/)).toBeTruthy()
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false)
+    expect(screen.queryByRole('heading', { name: 'Operation history' })).toBeNull()
+    expect(screen.getByText(/Operation history is unavailable for this account/)).toBeTruthy()
+    expect(fetchMock.mock.calls.some(([url]) => url.includes('/operations'))).toBe(false)
   })
 
   it.each([
     [401, /Sign in again/],
-    [403, /not permitted to delete environments/],
+    [403, /not permitted to delete this environment/],
   ])('explains HTTP %s rejection with its request ID', async (status, message) => {
     portal(ready, async () => json({ code: status === 401 ? 'UNAUTHENTICATED' : 'FORBIDDEN',
       message: '<b>untrusted</b>', requestId: `request-${status}` }, status))
     render(<EnvironmentDetail id={ready.id} />)
     await confirm()
     await userEvent.click(screen.getByRole('button', { name: 'Confirm deletion' }))
+    if (status === 401) {
+      await waitFor(() => expect(screen.queryByRole('heading', { name: ready.name })).toBeNull())
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(screen.queryByRole('alert')).toBeNull()
+      return
+    }
     const alert = await screen.findByRole('alert')
     expect(alert.textContent).toMatch(message)
     expect(alert.textContent).toContain(`request-${status}`)
     expect(alert.textContent).not.toContain('untrusted')
+  })
+
+  it.each([
+    ['team-one', false],
+    ['team-two', false],
+    ['team-other', true],
+    [null, true],
+  ])('allows developers to delete only member-owned environments: %s', async (teamId, disabled) => {
+    setSession({ ...operatorSession,
+      identity: { username: 'developer', roles: ['DEVELOPER'], teams: ['team-one', 'team-two'] } })
+    portal({ ...ready, teamId })
+    render(<EnvironmentDetail id={ready.id} />)
+    expect(await screen.findByRole('button', { name: 'Delete environment' })).toHaveProperty('disabled', disabled)
   })
 })

@@ -131,9 +131,10 @@ class KubernetesSmokeTests(unittest.TestCase):
         body = self.kubectl("exec", "deployment/frontend", "--", "wget", "-qO-",
                             "http://127.0.0.1:8080/")
         self.assertIn('<div id="root">', body)
-        environments = self.kubectl("exec", "deployment/frontend", "--", "wget", "-qO-",
-                                    "http://127.0.0.1:8080/api/v1/environments")
-        self.assertIsInstance(json.loads(environments)["items"], list)
+        status = self.kubectl("exec", "deployment/backend", "--", "curl", "--silent",
+                              "--output", "/dev/null", "--write-out", "%{http_code}",
+                              "http://frontend/api/v1/environments")
+        self.assertEqual("401", status)
         readiness = self.kubectl("exec", "deployment/backend", "--", "curl", "--fail",
                                  "--silent", "http://127.0.0.1:8080/actuator/health/readiness")
         self.assertEqual("UP", json.loads(readiness)["status"])
@@ -164,7 +165,7 @@ class KubernetesLifecycleTests(unittest.TestCase):
             (os.environ["PLATFORM_K3S_OPERATOR_USERNAME"] + ":" +
              os.environ["PLATFORM_K3S_OPERATOR_PASSWORD"]).encode()).decode()
 
-    def request(self, path, method="GET", body=None, authenticated=False, headers=None):
+    def request(self, path, method="GET", body=None, authenticated=True, headers=None):
         headers = dict(headers or {})
         if authenticated:
             headers["Authorization"] = self.authorization
@@ -222,7 +223,8 @@ class KubernetesLifecycleTests(unittest.TestCase):
         key = "k3s-lifecycle-" + uuid.uuid4().hex
         headers = {"Idempotency-Key": key}
         self.assertEqual(401, self.request("/api/v1/environments", "POST", payload,
-                                          headers=headers)[0])
+                                          authenticated=False, headers=headers)[0])
+        self.assertEqual(401, self.request("/api/v1/environments", authenticated=False)[0])
         status, accepted = self.request("/api/v1/environments", "POST", payload,
                                         authenticated=True, headers=headers)
         self.assertEqual(202, status)

@@ -84,8 +84,10 @@ starting points, but do not supply a full platform Kubernetes deployment:
   and a renewal plan; do not treat the existing Compose TLS endpoint as ingress.
 - [ ] Apply baseline hardening: restricted pod security, non-root/read-only
   application containers, dropped capabilities, resource requests/limits,
-  network isolation, and protected secrets. Review anonymous reads and operator
-  permissions before broadening exposure.
+  network isolation, and protected secrets. All API reads now require Basic;
+  review team-scoped developer access, platform-wide operator permissions and
+  exclusive cleanup discovery/guarded-delete access before broadening exposure.
+  Health probes remain anonymous.
 - [ ] Validate the deployed stack end to end: authenticated creation, observed
   workload readiness, durable operation history, safe deletion and namespace
   absence, API-driven expiration cleanup, restart persistence, and database

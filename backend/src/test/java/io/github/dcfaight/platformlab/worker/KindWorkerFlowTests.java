@@ -131,7 +131,8 @@ class KindWorkerFlowTests {
     }
 
     private JsonNode get(HttpClient client, String path) throws Exception {
-        var response = client.send(HttpRequest.newBuilder(url(path)).timeout(Duration.ofSeconds(10)).GET().build(),
+        var response = client.send(HttpRequest.newBuilder(url(path)).timeout(Duration.ofSeconds(10))
+                .header("Authorization", TestUsers.basic(TestUsers.OPERATOR)).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode(), response.body());
         return mapper.readTree(response.body());

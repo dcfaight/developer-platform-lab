@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, createEnvironment, deleteEnvironment, environment, environmentPage, operationPage, read, signIn } from './client'
 import { getSession, setSession } from './session'
 import { demoEnvironment, demoOperation, json, operatorSession, paged } from '../test/fixtures'
 
-afterEach(() => vi.unstubAllGlobals())
+beforeEach(() => setSession(operatorSession))
+afterEach(() => { vi.unstubAllGlobals(); setSession(null) })
 
 describe('read-only API boundary', () => {
   it('uses same-origin GET reads with an abort signal and decodes pagination', async () => {
@@ -13,7 +14,7 @@ describe('read-only API boundary', () => {
     expect(await read('/environments?page=0&size=10', environmentPage, signal))
       .toEqual(paged([demoEnvironment]))
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/environments?page=0&size=10', {
-      signal, headers: { Accept: 'application/json' },
+      signal, headers: { Accept: 'application/json', Authorization: operatorSession.authorization },
     })
     expect(operationPage(paged([demoOperation])).items[0]).toEqual(demoOperation)
   })
@@ -82,6 +83,7 @@ describe('read-only API boundary', () => {
         Accept: 'application/json',
         'Content-Type': 'application/json',
         'Idempotency-Key': 'request-key-123',
+        Authorization: operatorSession.authorization,
       },
       body: JSON.stringify(payload),
     }))
@@ -187,9 +189,9 @@ describe('operator credentials', () => {
   afterEach(() => setSession(null))
 
   it('verifies credentials against /api/v1/me and keeps them only in memory', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(json({ username: 'alice', roles: ['OPERATOR'] }))
+    const fetchMock = vi.fn().mockResolvedValue(json(operatorSession.identity))
     vi.stubGlobal('fetch', fetchMock)
-    expect(await signIn('alice', 'test-only-alice-pass')).toEqual({ username: 'alice', roles: ['OPERATOR'] })
+    expect(await signIn('alice', 'test-only-alice-pass')).toEqual(operatorSession.identity)
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/me', { headers: {
       Accept: 'application/json', Authorization: operatorSession.authorization } })
     expect(getSession()).toEqual(operatorSession)
@@ -198,15 +200,15 @@ describe('operator credentials', () => {
   })
 
   it('accepts the configured spelling of a case-insensitively matched account', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ username: 'alice', roles: ['OPERATOR'] })))
-    expect(await signIn('Alice', 'test-only-alice-pass')).toEqual({ username: 'alice', roles: ['OPERATOR'] })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(operatorSession.identity)))
+    expect(await signIn('Alice', 'test-only-alice-pass')).toEqual(operatorSession.identity)
     expect(getSession()?.identity.username).toBe('alice')
   })
 
   it('rejects invalid input, wrong credentials, and mismatched identities without a session', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(json({ code: 'UNAUTHENTICATED', requestId: 'request-401' }, 401))
-      .mockResolvedValueOnce(json({ username: 'mallory', roles: ['OPERATOR'] }))
+      .mockResolvedValueOnce(json({ username: 'mallory', roles: ['OPERATOR'], teams: [] }))
     vi.stubGlobal('fetch', fetchMock)
     await expect(signIn('alice:x', 'pw')).rejects.toThrow('valid username')
     await expect(signIn('alice', '')).rejects.toThrow('valid username')
@@ -216,7 +218,7 @@ describe('operator credentials', () => {
     expect(getSession()).toBeNull()
   })
 
-  it('sends the operator credential on mutations and never on reads', async () => {
+  it('sends the credential on both mutations and reads', async () => {
     setSession(operatorSession)
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(json(paged([demoEnvironment])))
@@ -225,7 +227,8 @@ describe('operator credentials', () => {
     vi.stubGlobal('fetch', fetchMock)
     await read('/environments', environmentPage)
     await deleteEnvironment(demoEnvironment.id)
-    expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({ Accept: 'application/json' })
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({
+      Accept: 'application/json', Authorization: operatorSession.authorization })
     expect(fetchMock.mock.calls[1]?.[1]?.headers).toEqual({
       Accept: 'application/json', Authorization: operatorSession.authorization })
   })
@@ -242,5 +245,78 @@ describe('operator credentials', () => {
     await expect(createEnvironment(payload, 'key')).rejects.toMatchObject({
       code: 'UNAUTHENTICATED', requestId: 'request-401', outcomeUncertain: false })
     expect(getSession()).toBeNull()
+  })
+
+  it('loads all durable memberships from the authenticated identity response', async () => {
+    const identity = { username: 'dev', roles: ['DEVELOPER'], teams: ['team-one', 'team-two'] }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(identity)))
+    expect(await signIn('dev', 'test-only-password')).toEqual(identity)
+    expect(getSession()?.identity.teams).toEqual(['team-one', 'team-two'])
+  })
+
+  it.each([undefined, null, 'team-one', [123]])('rejects malformed identity teams: %j', async (teams) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ ...operatorSession.identity, teams })))
+    await expect(signIn('alice', 'test-only-password')).rejects.toThrow('unexpected sign-in response')
+    expect(getSession()).toBeNull()
+  })
+
+  it('does not send unauthenticated reads', async () => {
+    setSession(null)
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(read('/environments', environmentPage)).rejects.toMatchObject({ code: 'UNAUTHENTICATED' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each([200, 401])('fences stale read responses (HTTP %s) without clearing the next account', async (status) => {
+    let resolve!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((done) => { resolve = done })))
+    const pending = expect(read('/environments', environmentPage)).rejects.toMatchObject({ code: 'SESSION_CHANGED' })
+    const next = { ...operatorSession, identity: { ...operatorSession.identity, username: 'bob' } }
+    setSession(next)
+    resolve(json(paged([demoEnvironment]), status))
+    await pending
+    expect(getSession()).toBe(next)
+  })
+
+  it('fences JSON decoding that finishes after an account switch', async () => {
+    let resolve!: (body: unknown) => void
+    const response = json({})
+    vi.spyOn(response, 'json').mockImplementation(() => new Promise((done) => { resolve = done }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+    const pending = expect(read('/environments', environmentPage)).rejects.toMatchObject({ code: 'SESSION_CHANGED' })
+    await vi.waitFor(() => expect(resolve).toBeTypeOf('function'))
+    setSession(null)
+    resolve(paged([demoEnvironment]))
+    await pending
+  })
+
+  it('invalidates loaded credentials even when the next sign-in fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({}, 401)))
+    await expect(signIn('bob', 'incorrect')).rejects.toMatchObject({ code: 'UNAUTHENTICATED' })
+    expect(getSession()).toBeNull()
+  })
+
+  it('does not resurrect an earlier sign-in after a newer failed attempt', async () => {
+    let resolve!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn()
+      .mockImplementationOnce(() => new Promise<Response>((done) => { resolve = done }))
+      .mockResolvedValueOnce(json({}, 401)))
+    const pending = expect(signIn('alice', 'test-only-password')).rejects.toMatchObject({ code: 'SESSION_CHANGED' })
+    await expect(signIn('bob', 'incorrect')).rejects.toMatchObject({ code: 'UNAUTHENTICATED' })
+    resolve(json(operatorSession.identity))
+    await pending
+    expect(getSession()).toBeNull()
+  })
+
+  it('does not let a stale mutation failure sign out the new account', async () => {
+    let resolve!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((done) => { resolve = done })))
+    const pending = expect(deleteEnvironment(demoEnvironment.id)).rejects.toMatchObject({ code: 'SESSION_CHANGED' })
+    const next = { ...operatorSession, identity: { ...operatorSession.identity, username: 'bob' } }
+    setSession(next)
+    resolve(json({}, 401))
+    await pending
+    expect(getSession()).toBe(next)
   })
 })

@@ -11,7 +11,12 @@ public record CreateEnvironmentRequest(
         String name,
         @NotNull @Pattern(regexp = "sample-service", message = "must be sample-service")
         String templateId,
-        @Min(1) @Max(24) Integer ttlHours) {
+        @Min(1) @Max(24) Integer ttlHours,
+        @Pattern(regexp = "[a-z0-9][a-z0-9-]{0,62}") String teamId) {
+    public CreateEnvironmentRequest(String name, String templateId, Integer ttlHours) {
+        this(name, templateId, ttlHours, null);
+    }
+
     public CreateEnvironmentRequest {
         name = name == null ? null : name.strip();
         ttlHours = ttlHours == null ? 8 : ttlHours;

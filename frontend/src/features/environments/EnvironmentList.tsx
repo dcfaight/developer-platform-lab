@@ -35,11 +35,12 @@ export function EnvironmentList({ page, onPageChange }: {
         : <div className="table-scroll"><table>
           <caption className="sr-only">Environments and their latest operation status</caption>
           <thead><tr><th scope="col">Environment</th><th scope="col">Status</th><th scope="col">Template / namespace</th>
-            <th scope="col">Created / expires</th><th scope="col">Latest operation</th></tr></thead>
+            <th scope="col">Team / created by</th><th scope="col">Created / expires</th><th scope="col">Latest operation</th></tr></thead>
           <tbody>{data.items.map((item) => <tr key={item.id}>
             <td><a className="environment-link" href={`#environment/${encodeURIComponent(item.id)}`}>{item.name}</a></td>
             <td><Status value={item.status} /></td>
             <td><span>{item.templateId}</span><code>{item.namespace}</code></td>
+            <td><span>{item.teamId ?? 'Operator-managed (no team)'}</span><small>{item.createdBy ?? 'Creator not recorded'}</small></td>
             <td><span>Created <Timestamp value={item.createdAt} /></span>
               <span>Expires <Timestamp value={item.expiresAt} /></span></td>
             <td>{item.latestOperation ? <>

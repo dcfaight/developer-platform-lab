@@ -19,6 +19,8 @@ The [frontend portal](../frontend/README.md) supports environment creation,
 confirmed deletion, list/detail reads, and paginated operation history. It uses
 only the backend API and never accesses Kubernetes directly. Environment responses include
 a nullable latest-operation summary; existing operation detail fields are unchanged.
+Environment DTOs also include `teamId` and `createdBy`, both nullable for legacy
+rows. Unowned environments remain operator-managed; there is no ownership transfer.
 
 ## Run locally
 
@@ -79,22 +81,24 @@ Only health is exposed by Actuator; no environment/configuration dump is enabled
 
 ## Authentication and authorization
 
-Mutations require HTTP Basic credentials for an account configured at startup.
-Reads stay anonymous. This is a first, deliberately narrow boundary, not SSO or
-enterprise RBAC. See [docs/api.md](../docs/api.md#authentication-and-authorization)
+All API reads and writes require HTTP Basic credentials for an account configured
+at startup. Only health probes remain anonymous. This is a bounded Basic/team
+authorization boundary, not SSO or production tenant isolation.
+See [docs/api.md](../docs/api.md#authentication-and-authorization)
 for the exact rules and error responses.
 
-| Role | Allowed mutations |
+| Role | Access |
 |---|---|
-| `OPERATOR` | `POST /api/v1/environments`; any `DELETE /api/v1/environments/{id}` (with or without `expiredBefore`) |
-| `CLEANUP` | Only expiry-guarded `DELETE /api/v1/environments/{id}?expiredBefore=…` (used by the cleanup CLI) |
+| `OPERATOR` | Platform-wide reads, metrics, creation and deletion. Creation may specify an existing `teamId`; omission creates an unowned environment for compatibility. |
+| `DEVELOPER` | List/detail/history/operation reads and deletion only for environments owned by current member teams. Creation requires an explicit member `teamId`; missing, unknown or nonmember teams return `403`. Metrics are denied. |
+| `CLEANUP` | Exclusive automation role: list/detail discovery of all environments (including legacy), and expiry-guarded `DELETE /api/v1/environments/{id}?expiredBefore=…` only. No operation history/direct operation reads, metrics, creation or manual deletion. Cannot combine with another role. |
 
 Accounts are configured with Spring Boot relaxed binding; only password
 **hashes** are accepted, prefixed `{bcrypt}` or `{pbkdf2@SpringSecurity_v5_8}`.
 Usernames match `[A-Za-z0-9][A-Za-z0-9._@-]{0,63}`; `local-development` is
 reserved and duplicate (case-insensitive) names are rejected at startup.
 With no accounts configured the backend still starts, logs a warning, and rejects
-every mutation. Generate a PBKDF2 hash without putting the password in shell
+every API read and write. Generate a PBKDF2 hash without putting the password in shell
 history (`$` in bcrypt hashes needs careful shell quoting, so PBKDF2 is simpler):
 
 ```sh
@@ -107,26 +111,67 @@ Then, in the shell that starts the backend (or in the IntelliJ run configuration
 export PLATFORM_SECURITY_USERS_0_USERNAME=alice
 export PLATFORM_SECURITY_USERS_0_PASSWORDHASH='<paste the printed hash>'
 export PLATFORM_SECURITY_USERS_0_ROLES=OPERATOR
-# Optional account for automation/cleanup_expired.py --execute:
+# Optional exclusive account for both cleanup CLI dry-run and execute:
 export PLATFORM_SECURITY_USERS_1_USERNAME=cleanup-bot
 export PLATFORM_SECURITY_USERS_1_PASSWORDHASH='<another hash>'
 export PLATFORM_SECURITY_USERS_1_ROLES=CLEANUP
+# Optional team-scoped developer account:
+export PLATFORM_SECURITY_USERS_2_USERNAME=bob
+export PLATFORM_SECURITY_USERS_2_PASSWORDHASH='<another independently generated hash>'
+export PLATFORM_SECURITY_USERS_2_ROLES=DEVELOPER
 ```
 
-`GET /api/v1/me` verifies credentials and returns `{"username", "roles"}`; the
+Passwords and roles use the existing configuration; do not add account-config
+team fields. A trusted SQL administrator provisions PostgreSQL
+`platform_teams(id varchar(63))` and
+`account_team_memberships(username varchar(64), team_id REFERENCES platform_teams(id))`.
+After Flyway has created the tables, connect to the platform database with trusted
+administrator credentials and run, for example:
+
+```sql
+BEGIN;
+INSERT INTO platform_teams (id) VALUES ('payments') ON CONFLICT DO NOTHING;
+INSERT INTO account_team_memberships (username, team_id)
+VALUES ('bob', 'payments') ON CONFLICT DO NOTHING;
+COMMIT;
+```
+
+Team IDs are lower-case slugs of 1–63 characters. `bob` must separately be a
+configured `DEVELOPER` account. Membership usernames **must match the configured
+account username spelling exactly**: Basic lookup may be case-insensitive, but
+returns the canonical configured spelling and database membership equality is
+exact. Use that spelling in trusted SQL; do not normalize it independently.
+Membership revocation removes team-scoped access,
+including replay; neither `createdBy` nor an old idempotency key grants access.
+There is no team/membership management API or automatic legacy adoption.
+
+`GET /api/v1/me` verifies credentials and returns, for example,
+`{"username":"bob","roles":["DEVELOPER"],"teams":["payments"]}`; the
 portal uses it to sign in. Audit events record the authenticated username as
 `actor` (never a caller-supplied header). Rows written before this change keep
 `local-development`; the V5 migration widens the actor constraint to the username
 format. Request completion logs still do not record the actor.
 
-Remaining gaps, stated plainly: credentials travel in every mutation request as
+New idempotency reservations are scoped to caller and team, including an unowned
+operator scope. Legacy global reservations remain replay-compatible for operators
+only. Equivalent authorized replay returns the original acceptance without a new
+audit event; different callers/team scopes can independently reuse a key.
+
+Remaining gaps, stated plainly: credentials travel in every API request as
 plain HTTP Basic, which is only acceptable on loopback (any other deployment needs
 TLS); there is no SSO/OIDC, session expiry, rate limiting, or account lockout;
-accounts are static configuration with no runtime management; reads, including
-audit-relevant history, are anonymous; any `OPERATOR` may delete any environment
-(no ownership- or team-based authorization); and idempotency keys are global, so
-replaying another operator's key returns the original acceptance without a new
-audit event.
+accounts are static configuration with no runtime management. Operator access is
+intentionally platform-wide; Basic/team authorization is not strong tenant
+isolation. No OIDC, GitOps or ownership transfer is added, and worker RBAC/ingress
+remain unchanged.
+
+### V7 upgrade compatibility
+
+Back up PostgreSQL before upgrading. V7 changes the idempotency primary key from
+`key` to `(scope, key)`. Stop **all old backend processes** before starting the
+upgraded backend and Flyway: this is not a mixed-version rolling migration,
+because the old `ON CONFLICT (key)` statements no longer work afterward.
+Environment, operation, idempotency and audit rows are retained.
 
 ## Enable local provisioning
 
@@ -184,7 +229,7 @@ failures are terminal. A readiness deadline prevents indefinite waiting.
 Operation detail retains UTC timestamps, attempt counts, sanitized messages,
 and progress events, including lifecycle milestones such as `NAMESPACE_CREATED`
 and `NAMESPACE_DELETE_REQUESTED`. `GET /api/v1/operations/metrics` summarizes
-status counts, durations, and worker backlog/lease health
+status counts, durations, and worker backlog/lease health (`OPERATOR` only)
 (see [API contract](../docs/api.md#read-operation-metrics)). Lease expiry permits at-least-once execution; idempotent
 Kubernetes reconciliation and database fencing protect repeated work.
 Queued work and retry delays survive restart, as do provisioned/waiting checkpoints
@@ -299,8 +344,8 @@ Expired TTL metadata does not remove resources.
 
 Run these in another terminal with an `OPERATOR` account configured as above.
 `-u "$OPERATOR_USERNAME"` makes curl prompt for the password, keeping it out of
-shell history and process arguments. Without credentials, POST returns `401`
-`UNAUTHENTICATED`; reads need none. The first request returns `202`, both IDs,
+shell history and process arguments. Without credentials, API reads and writes
+return `401 UNAUTHENTICATED`. The first request returns `202`, both IDs,
 `REQUESTED` / `PENDING`, a `Location` operation URL, and `X-Request-Id`:
 
 ```sh
@@ -322,17 +367,36 @@ curl -i -u "$OPERATOR_USERNAME" -X POST http://127.0.0.1:8080/api/v1/environment
   -H 'Idempotency-Key: local-demo-1' \
   -d '{"name":"different","templateId":"sample-service","ttlHours":8}'
 
-curl -i 'http://127.0.0.1:8080/api/v1/environments?page=0&size=20'
+curl -i -u "$OPERATOR_USERNAME" 'http://127.0.0.1:8080/api/v1/environments?page=0&size=20'
 
 # Replace these values with the IDs from the first response.
 ENVIRONMENT_ID='<environmentId>'
 OPERATION_ID='<operationId>'
-curl -i "http://127.0.0.1:8080/api/v1/environments/$ENVIRONMENT_ID"
-curl -i "http://127.0.0.1:8080/api/v1/operations/$OPERATION_ID"
+curl -i -u "$OPERATOR_USERNAME" "http://127.0.0.1:8080/api/v1/environments/$ENVIRONMENT_ID"
+curl -i -u "$OPERATOR_USERNAME" "http://127.0.0.1:8080/api/v1/environments/$ENVIRONMENT_ID/operations"
+curl -i -u "$OPERATOR_USERNAME" "http://127.0.0.1:8080/api/v1/operations/$OPERATION_ID"
+curl -i -u "$OPERATOR_USERNAME" http://127.0.0.1:8080/api/v1/operations/metrics
 
 # Malformed UUID: 400. Valid but unknown UUID: 404.
-curl -i http://127.0.0.1:8080/api/v1/environments/not-a-uuid
-curl -i http://127.0.0.1:8080/api/v1/operations/00000000-0000-0000-0000-000000000000
+curl -i -u "$OPERATOR_USERNAME" http://127.0.0.1:8080/api/v1/environments/not-a-uuid
+curl -i -u "$OPERATOR_USERNAME" http://127.0.0.1:8080/api/v1/operations/00000000-0000-0000-0000-000000000000
+```
+
+The operator examples deliberately omit `teamId`, so the new environment stays
+unowned/operator-managed. To create with an explicit owner, add
+`"teamId":"payments"` and use a fresh key. After provisioning the developer and
+membership above, use:
+
+```sh
+DEVELOPER_USERNAME=bob
+curl -i -u "$DEVELOPER_USERNAME" http://127.0.0.1:8080/api/v1/me
+curl -i -u "$DEVELOPER_USERNAME" http://127.0.0.1:8080/api/v1/environments \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: developer-demo-1' \
+  -d '{"name":"team demo","templateId":"sample-service","teamId":"payments","ttlHours":8}'
+# Only member-team environments and totals, never the unowned operator example:
+curl -i -u "$DEVELOPER_USERNAME" 'http://127.0.0.1:8080/api/v1/environments?page=0&size=20'
+# Metrics require OPERATOR: this returns 403.
+curl -i -u "$DEVELOPER_USERNAME" http://127.0.0.1:8080/api/v1/operations/metrics
 ```
 
 To verify persistence, stop the backend, run `docker compose restart postgres`

@@ -136,13 +136,13 @@ def base_url(value):
 
 
 def basic_authorization(environ):
-    """Build the DELETE credential from the environment; values are never logged or printed."""
+    """Build API credentials from the environment; values are never logged or printed."""
     username = environ.get(USERNAME_ENV)
     password = environ.get(PASSWORD_ENV)
     if (not isinstance(username, str)
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}", username)
             or not isinstance(password, str) or not password or len(password) > 1024):
-        raise ValueError(f"--execute requires {USERNAME_ENV} (a configured CLEANUP or OPERATOR "
+        raise ValueError(f"cleanup requires {USERNAME_ENV} (a configured CLEANUP or OPERATOR "
                          f"username) and a nonempty {PASSWORD_ENV} in the environment")
     token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
     return "Basic " + token
@@ -216,8 +216,7 @@ class Client:
             timer.start()
             sock.settimeout(self.args.request_timeout)
             headers = {"Accept": "application/json"}
-            # Reads are trusted-local; only the mutation carries credentials.
-            if method == "DELETE" and self.authorization:
+            if self.authorization:
                 headers["Authorization"] = self.authorization
             connection.request(method, "/api/v1" + path, headers=headers)
             response = connection.getresponse()
@@ -408,13 +407,11 @@ def run(args, clock=lambda: datetime.now(timezone.utc), client=None):
 
 def main(argv=None, environ=None):
     args = arguments(argv)
-    authorization = None
-    if args.execute:
-        try:
-            authorization = basic_authorization(os.environ if environ is None else environ)
-        except ValueError as error:
-            print(f"cleanup_expired.py: error: {error}", file=sys.stderr)
-            return 2
+    try:
+        authorization = basic_authorization(os.environ if environ is None else environ)
+    except ValueError as error:
+        print(f"cleanup_expired.py: error: {error}", file=sys.stderr)
+        return 2
     result = run(args, client=Client(args, authorization))
     if args.json:
         print(json.dumps(result, sort_keys=True))

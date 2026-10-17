@@ -3,10 +3,14 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { REFRESH_INTERVAL } from './api/useResource'
+import { signIn } from './api/client'
 import { setSession } from './api/session'
 import { demoEnvironment, demoOperation, json, operatorSession, paged } from './test/fixtures'
 
-beforeEach(() => window.history.replaceState(null, '', '/'))
+beforeEach(() => {
+  window.history.replaceState(null, '', '/')
+  setSession(operatorSession)
+})
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
@@ -509,8 +513,53 @@ describe('portal', () => {
   })
 })
 
-describe('operator sign-in', () => {
-  function identityPortal(me: () => Promise<Response>, post?: () => Promise<Response>) {
+describe('persisted creation ownership', () => {
+  const storageKey = 'dpl.environment-creation.v1'
+  const payload = { name: 'Private persisted environment', templateId: 'sample-service', ttlHours: 19, teamId: 'private-team' }
+  const otherOperator = { ...operatorSession, identity: { ...operatorSession.identity, username: 'bob' } }
+
+  it.each([null, 'alice', 'bob'])('removes ownerless legacy intents without exposing their payload to %s', (username) => {
+    setSession(username === null ? null : username === 'alice' ? operatorSession : otherOperator)
+    window.sessionStorage.setItem(storageKey, JSON.stringify({ version: 1, key: 'legacy-ownerless-key', payload }))
+    window.history.replaceState(null, '', '/#create')
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    expect(screen.getByLabelText('Environment name')).toHaveProperty('value', '')
+    expect(screen.getByLabelText('Lifetime (hours)')).toHaveProperty('value', '8')
+    expect(screen.getByLabelText('Team')).toHaveProperty('value', '')
+    expect(screen.queryByText(/Private persisted environment/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry the same request' })).toBeNull()
+    expect(window.sessionStorage.getItem(storageKey)).toBeNull()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each([null, 'bob', 'Alice'])('restores owned persisted payload only after exact authenticated match, not %s', (username) => {
+    setSession(username === null ? null : { ...operatorSession, identity: { ...operatorSession.identity, username } })
+    const stored = JSON.stringify({ version: 1, key: 'owned-request-key', username: 'alice', payload })
+    window.sessionStorage.setItem(storageKey, stored)
+    window.history.replaceState(null, '', '/#create')
+    vi.stubGlobal('fetch', vi.fn())
+    render(<App />)
+    expect(screen.getByLabelText('Environment name')).toHaveProperty('value', '')
+    expect(screen.getByLabelText('Lifetime (hours)')).toHaveProperty('value', '8')
+    expect(screen.queryByRole('button', { name: 'Retry the same request' })).toBeNull()
+    expect(screen.queryByText(/Private persisted environment/)).toBeNull()
+    act(() => setSession(operatorSession))
+    expect(screen.getByLabelText('Environment name')).toHaveProperty('value', payload.name)
+    expect(screen.getByLabelText('Lifetime (hours)')).toHaveProperty('value', '19')
+    expect(screen.getByRole('button', { name: 'Retry the same request' })).toBeTruthy()
+    expect(window.sessionStorage.getItem(storageKey)).toBe(stored)
+    act(() => setSession(otherOperator))
+    expect(screen.getByLabelText('Environment name')).toHaveProperty('value', '')
+    expect(screen.queryByRole('button', { name: 'Retry the same request' })).toBeNull()
+    act(() => setSession(null))
+    expect(screen.getByLabelText('Environment name')).toHaveProperty('value', '')
+    expect(screen.queryByText(/Private persisted environment/)).toBeNull()
+  })
+})
+
+function identityPortal(me: () => Promise<Response>, post?: () => Promise<Response>) {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (url === '/api/v1/me') return me()
       if (init?.method === 'POST' && post) return post()
@@ -518,28 +567,177 @@ describe('operator sign-in', () => {
       if (url.includes(`/environments/${demoEnvironment.id}`)) return json(demoEnvironment)
       return json(paged([]))
     })
+
     vi.stubGlobal('fetch', fetchMock)
     return fetchMock
-  }
+}
 
+describe('team access and session isolation', () => {
+      const developer = {
+        ...operatorSession,
+        identity: { username: 'developer', roles: ['DEVELOPER'], teams: ['team-one', 'team-two'] },
+      }
+
+      it('does not load any inventory while signed out', () => {
+        setSession(null)
+        const fetchMock = vi.fn()
+        vi.stubGlobal('fetch', fetchMock)
+        render(<App />)
+        expect(screen.getByText(/Sign in above to view environments/)).toBeTruthy()
+        expect(fetchMock).not.toHaveBeenCalled()
+      })
+
+      it.each(['team-one', 'team-two'])('requires and submits the selected developer team: %s', async (team) => {
+        setSession(developer)
+        window.history.replaceState(null, '', '/#create')
+        stubCreationKey('team-request-key')
+        const fetchMock = createdPortal(async () => json({
+          environmentId: demoEnvironment.id, operationId: demoOperation.id,
+          environmentStatus: 'REQUESTED', operationStatus: 'PENDING',
+        }, 202))
+        render(<App />)
+        await userEvent.type(screen.getByLabelText('Environment name'), 'Team environment')
+        await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+        expect(screen.getByText('Choose one of your teams.', { selector: '.field-error' })).toBeTruthy()
+        expect(fetchMock).not.toHaveBeenCalled()
+        await userEvent.selectOptions(screen.getByLabelText('Team'), team)
+        await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+        await screen.findByRole('heading', { name: 'Operation history' })
+        const post = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')
+        expect(JSON.parse(post![1]!.body as string)).toEqual({
+          name: 'Team environment', templateId: 'sample-service', ttlHours: 8, teamId: team,
+        })
+      })
+
+      it('shows all returned memberships without sending a team filter or global metrics request', async () => {
+        setSession(developer)
+        const fetchMock = vi.fn().mockResolvedValue(json(paged([
+          { ...demoEnvironment, teamId: 'team-one', createdBy: 'developer' },
+          { ...demoEnvironment, id: demoOperation.id, name: 'Second team environment', teamId: 'team-two', createdBy: 'colleague' },
+        ])))
+        vi.stubGlobal('fetch', fetchMock)
+        render(<App />)
+        await screen.findByRole('link', { name: 'Second team environment' })
+        expect(screen.getAllByText('team-one').length).toBeGreaterThan(0)
+        expect(screen.getAllByText('team-two').length).toBeGreaterThan(0)
+        expect(screen.getByText('colleague')).toBeTruthy()
+        expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/v1/environments?page=0&size=10'])
+      })
+
+      it('lets an operator explicitly create a team-owned environment', async () => {
+        window.history.replaceState(null, '', '/#create')
+        stubCreationKey('operator-team-key')
+        const fetchMock = createdPortal(async () => json({
+          environmentId: demoEnvironment.id, operationId: demoOperation.id,
+          environmentStatus: 'REQUESTED', operationStatus: 'PENDING',
+        }, 202))
+        render(<App />)
+        await userEvent.type(screen.getByLabelText('Environment name'), 'Operator team environment')
+        await userEvent.type(screen.getByLabelText('Other team ID'), 'team-other')
+        await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+        await screen.findByRole('heading', { name: 'Operation history' })
+        const post = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')
+        expect(JSON.parse(post![1]!.body as string).teamId).toBe('team-other')
+      })
+
+      it.each(['inventory', 'detail'])('immediately clears loaded %s and history on account switches', async (view) => {
+        if (view === 'detail') window.history.replaceState(null, '', `/#environment/${demoEnvironment.id}`)
+        mockPortal()
+        render(<App />)
+        if (view === 'detail') await screen.findByText(demoOperation.events[0].message)
+        else await screen.findByRole('link', { name: demoEnvironment.name })
+        vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})))
+        act(() => setSession(developer))
+        expect(screen.queryByText(demoEnvironment.name)).toBeNull()
+        expect(screen.queryByText(demoOperation.events[0].message)).toBeNull()
+        expect(screen.queryByRole('heading', { name: 'Operation history' })).toBeNull()
+        expect(screen.queryByRole('alert')).toBeNull()
+        expect(screen.getByRole('status').textContent).toBe('Loading…')
+      })
+
+      it('clears loaded inventory and errors as soon as a failing sign-in begins', async () => {
+        let fail!: (response: Response) => void
+        const fetchMock = vi.fn(async (url: string) => url === '/api/v1/me'
+          ? new Promise<Response>((resolve) => { fail = resolve })
+          : json(paged([demoEnvironment])))
+        vi.stubGlobal('fetch', fetchMock)
+        render(<App />)
+        await screen.findByRole('link', { name: demoEnvironment.name })
+        let pending!: Promise<unknown>
+        act(() => { pending = signIn('bob', 'incorrect').catch(() => undefined) })
+        expect(screen.queryByText(demoEnvironment.name)).toBeNull()
+        expect(screen.queryByRole('alert')).toBeNull()
+        await act(async () => { fail(json({}, 401)); await pending })
+        expect(screen.queryByText(demoEnvironment.name)).toBeNull()
+      })
+
+      it.each([200, 403])('ignores stale inventory responses after an account switch (HTTP %s)', async (status) => {
+        let resolve!: (response: Response) => void
+        const fetchMock = vi.fn()
+          .mockImplementationOnce(() => new Promise<Response>((done) => { resolve = done }))
+          .mockResolvedValue(json(paged([])))
+        vi.stubGlobal('fetch', fetchMock)
+        render(<App />)
+        act(() => setSession(developer))
+        await screen.findByRole('heading', { name: 'No environments yet' })
+        await act(async () => resolve(json(status === 200 ? paged([demoEnvironment]) : { message: 'Private old error' }, status)))
+        expect(screen.queryByText(demoEnvironment.name)).toBeNull()
+        expect(screen.queryByText('Private old error')).toBeNull()
+        expect(screen.queryByRole('alert')).toBeNull()
+      })
+
+      it('clears previously loaded API errors on sign-out', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ message: 'Old account error' }, 403)))
+        render(<App />)
+        await screen.findByRole('alert')
+        await userEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+        expect(screen.queryByText(/Old account error/)).toBeNull()
+        expect(screen.queryByRole('alert')).toBeNull()
+      })
+
+      it.each([202, 401])('ignores stale creation results after an account switch (HTTP %s)', async (status) => {
+        window.history.replaceState(null, '', '/#create')
+        stubCreationKey('stale-creation-key')
+        let resolve!: (response: Response) => void
+        createdPortal(() => new Promise<Response>((done) => { resolve = done }))
+        render(<App />)
+        await userEvent.type(screen.getByLabelText('Environment name'), 'Old private draft')
+        await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
+        act(() => setSession(developer))
+        expect(screen.getByLabelText('Environment name')).toHaveProperty('value', '')
+        expect(screen.queryByRole('button', { name: 'Retry the same request' })).toBeNull()
+        await act(async () => resolve(json(status === 202 ? {
+          environmentId: demoEnvironment.id, operationId: demoOperation.id,
+          environmentStatus: 'REQUESTED', operationStatus: 'PENDING',
+        } : { code: 'UNAUTHENTICATED' }, status)))
+        expect(window.location.hash).toBe('#create')
+        expect(screen.getByText(/Signed in as/).textContent).toContain('developer')
+        expect(screen.queryByRole('alert')).toBeNull()
+        expect(screen.queryByText(/Old private draft/)).toBeNull()
+      })
+    })
+describe('operator sign-in', () => {
+  beforeEach(() => setSession(null))
   async function signInThroughPortal(username = 'alice', password = 'test-only-alice-pass') {
     await userEvent.type(screen.getByLabelText('Username'), username)
     await userEvent.type(screen.getByLabelText('Password'), password)
     await userEvent.click(screen.getByRole('button', { name: 'Sign in' }))
   }
 
-  it('keeps browsing open but disables creation until an operator signs in, holding credentials only in memory', async () => {
-    const fetchMock = identityPortal(async () => json({ username: 'alice', roles: ['OPERATOR'] }))
+  it('requires sign-in and holds credentials only in memory', async () => {
+    const fetchMock = identityPortal(async () => json(operatorSession.identity))
     window.history.replaceState(null, '', '/#create')
     render(<App />)
-    expect(screen.getByText(/Sign in with an OPERATOR account/)).toBeTruthy()
+    expect(screen.getByText(/Sign in with a DEVELOPER or OPERATOR account/)).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Create environment' })).toHaveProperty('disabled', true)
+    await userEvent.type(screen.getByLabelText('Environment name'), 'Draft before sign-in')
     await signInThroughPortal()
     expect(await screen.findByText(/Signed in as/)).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Create environment' })).toHaveProperty('disabled', false)
     const me = fetchMock.mock.calls.find(([url]) => url === '/api/v1/me')
     expect((me?.[1]?.headers as Record<string, string> | undefined)?.Authorization).toBe(operatorSession.authorization)
     expect(screen.getByLabelText('Environment name')).toBeTruthy()
+    expect(screen.getByLabelText('Environment name')).toHaveProperty('value', 'Draft before sign-in')
     expect(window.sessionStorage.length).toBe(0)
     expect(window.localStorage.length).toBe(0)
     expect(document.cookie).toBe('')
@@ -556,7 +754,7 @@ describe('operator sign-in', () => {
   })
 
   it('explains that a signed-in account without the operator role cannot create', async () => {
-    identityPortal(async () => json({ username: 'cleanup-bot', roles: ['CLEANUP'] }))
+    identityPortal(async () => json({ username: 'cleanup-bot', roles: ['CLEANUP'], teams: [] }))
     window.history.replaceState(null, '', '/#create')
     render(<App />)
     await signInThroughPortal('cleanup-bot', 'test-only-cleanup-bot-pass')
@@ -564,11 +762,12 @@ describe('operator sign-in', () => {
     expect(screen.getByRole('button', { name: 'Create environment' })).toHaveProperty('disabled', true)
   })
 
-  it('keeps the same idempotency key after a 401 so the request can be retried after signing in again', async () => {
+  it.each([false, true])('keeps the same idempotency key after reauthentication (storage blocked: %s)', async (blocked) => {
+    if (blocked) vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Storage blocked') })
     stubCreationKey('create-key-1', 'create-key-2')
     setSession(operatorSession)
     let posts = 0
-    const fetchMock = identityPortal(async () => json({ username: 'alice', roles: ['OPERATOR'] }), async () => {
+    const fetchMock = identityPortal(async () => json(operatorSession.identity), async () => {
       posts += 1
       return posts === 1
         ? json({ code: 'UNAUTHENTICATED', message: 'x', requestId: 'request-401' }, 401)
@@ -579,9 +778,9 @@ describe('operator sign-in', () => {
     render(<App />)
     await userEvent.type(screen.getByLabelText('Environment name'), 'After sign-in')
     await userEvent.click(screen.getByRole('button', { name: 'Create environment' }))
-    expect(await screen.findByText(/Sign in again/)).toBeTruthy()
-    expect(screen.getByText(/request-401/)).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Retry the same request' })).toHaveProperty('disabled', true)
+    await screen.findByRole('button', { name: 'Sign in' })
+    expect(screen.queryByText(/request-401/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry the same request' })).toBeNull()
     await signInThroughPortal()
     await screen.findByText(/Signed in as/)
     await userEvent.click(screen.getByRole('button', { name: 'Retry the same request' }))

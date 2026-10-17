@@ -26,13 +26,23 @@ or production readiness.
   requirements. The shortlist is not an approved stack, and Phase C is not
   complete.
 - **Phase D — implement and validate:** Build a deployable baseline and record
-  evidence and limitations. This PR is the current bounded increment: resource
-  budgets for newly provisioned development namespaces, with lifecycle and
-  ownership safety preserved.
+  evidence and limitations. This bounded increment adds Basic-authenticated,
+  team-scoped self-service authorization, preserving existing resource budgets,
+  lifecycle and namespace-ownership safety. Trusted SQL administrators provision
+  teams and memberships; legacy unowned environments stay operator-managed.
+  Live smoke checks verified anonymous reads return `401`, cross-team developer
+  creation returns `403` without writes or idempotency reservations, owned-team
+  creation/replay returns `202`, and revocation blocks replay and list access.
+  This evidence does not establish production readiness.
 
 The next delivery sequence is:
 
-1. Implement identity and team authorization for self-service access.
+1. Build on the implemented Basic/team authorization boundary with future
+   identity-provider integration (SSO/OIDC) and account-management hardening.
+   Operators have platform-wide access, developers require team ownership, and
+   exclusive cleanup accounts have list/detail discovery plus expiry-guarded deletion only;
+   health remains anonymous. Identity-provider integration is not part of this
+   increment.
 2. Establish reproducible GitOps deployment and rollback.
 3. Validate backup and restore, including recovery evidence.
 4. Measure capacity with explicit workload and concurrency targets.

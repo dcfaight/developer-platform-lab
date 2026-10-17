@@ -18,7 +18,7 @@ public class EnvironmentRepository {
     private static final RowMapper<EnvironmentRecord> MAPPER = (rs, row) -> new EnvironmentRecord(
             rs.getObject("id", UUID.class), rs.getString("name"), rs.getString("namespace"),
             rs.getString("template_id"), rs.getString("status"), instant(rs, "expires_at"),
-            instant(rs, "created_at"), instant(rs, "updated_at"));
+            instant(rs, "created_at"), instant(rs, "updated_at"), rs.getString("team_id"), rs.getString("created_by"));
 
     public EnvironmentRepository(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
@@ -26,11 +26,12 @@ public class EnvironmentRepository {
 
     public void insert(EnvironmentRecord environment) {
         jdbc.update("""
-                INSERT INTO environments (id, name, namespace, template_id, status, expires_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO environments (id, name, namespace, template_id, status, expires_at, created_at, updated_at,
+                    team_id, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, environment.id(), environment.name(), environment.namespace(), environment.templateId(),
                 environment.status(), utc(environment.expiresAt()), utc(environment.createdAt()),
-                utc(environment.updatedAt()));
+                utc(environment.updatedAt()), environment.teamId(), environment.createdBy());
     }
 
     public Optional<EnvironmentRecord> find(UUID id) {
@@ -55,6 +56,21 @@ public class EnvironmentRepository {
         return jdbc.queryForObject("SELECT count(*) FROM environments", Long.class);
     }
 
+    public List<EnvironmentRecord> pageForAccount(String username, int page, int size) {
+        return jdbc.query("""
+                SELECT e.* FROM environments e WHERE EXISTS (
+                    SELECT 1 FROM account_team_memberships m WHERE m.username = ? AND m.team_id = e.team_id)
+                ORDER BY e.created_at DESC, e.id DESC LIMIT ? OFFSET ?
+                """, MAPPER, username, size, (long) page * size);
+    }
+
+    public long countForAccount(String username) {
+        return jdbc.queryForObject("""
+                SELECT count(*) FROM environments e WHERE EXISTS (
+                    SELECT 1 FROM account_team_memberships m WHERE m.username = ? AND m.team_id = e.team_id)
+                """, Long.class, username);
+    }
+
     private static Instant instant(ResultSet rs, String column) throws SQLException {
         return rs.getObject(column, OffsetDateTime.class).toInstant();
     }
@@ -64,6 +80,10 @@ public class EnvironmentRepository {
     }
 
     public record EnvironmentRecord(UUID id, String name, String namespace, String templateId,
-            String status, Instant expiresAt, Instant createdAt, Instant updatedAt) {
+            String status, Instant expiresAt, Instant createdAt, Instant updatedAt, String teamId, String createdBy) {
+        public EnvironmentRecord(UUID id, String name, String namespace, String templateId,
+                String status, Instant expiresAt, Instant createdAt, Instant updatedAt) {
+            this(id, name, namespace, templateId, status, expiresAt, createdAt, updatedAt, null, null);
+        }
     }
 }
