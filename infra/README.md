@@ -686,16 +686,23 @@ actor/team scopes**. The drill validates known fixture values and relationships,
 then uses PostgreSQL 18 `pg_dump --format=custom` and `pg_restore` into the empty
 restore database. It compares every column in all fixture tables and Flyway
 history (including checksums/success), schema DDL, and sequence value/called state.
+For schema comparison, PostgreSQL itself parses the source DDL into a fresh
+schema-only `schema_reference` database inside the disposable source pod. This
+normalizes PostgreSQL's equivalent array-cast rendering on logical restore
+without custom SQL rewriting; the source fixture database is not reconfigured.
 No migrations or backend process run against the restored database.
 
 Each run prints a new mode-0700 directory containing:
 
 - `fixture.dump` (mode 0600): the logical backup, not raw database storage.
 - `fixture.dump.sha256`: SHA-256 of that artifact.
+- `source-schema.sql` and `restore-schema.sql` (mode 0600): server-normalized
+  source DDL and restored DDL for inspecting schema verification, without fixture rows.
 - `evidence.json` (mode 0600): pass/fail and failed stage, explicit context,
   namespace/pod UIDs, database identities, configured/runtime images,
   Kubernetes/PostgreSQL versions, checksum, per-table/schema/sequence verification
-  results, and measured backup/restore command durations in seconds.
+  results (including false comparisons on mismatch), and measured backup/restore
+  command durations in seconds.
 
 Evidence contains no passwords, SQL rows, kubeconfig, or raw error bodies.
 Context/resource identities can still be internal metadata: review before sharing.
@@ -710,7 +717,8 @@ fixture, **not production RTO**.
 Kubernetes requests have a 15-second request timeout; commands normally have a
 60-second subprocess bound, pod readiness 180 seconds, backup/restore 120
 seconds each, and cleanup waits at most 90 seconds. Pods have a 900-second active
-deadline and bounded CPU/memory/storage. Failure or Ctrl-C attempts cleanup and
+deadline and bounded CPU/memory/storage; the disposable source backend allows
+60 seconds for initial database-pool connection acquisition. Failure or Ctrl-C attempts cleanup and
 retains sanitized stage evidence and any partial backup. A failed/partial dump
 is not recovery evidence.
 
@@ -732,9 +740,22 @@ recovery, PITR, HA, replication, failover, production RPO/RTO or production
 recovery readiness. Scheduling, production backup storage/retention, recovery
 objectives and capacity testing remain future work.
 
-**Validation status:** offline safety/verification tests accompany this
-implementation. A successful live K3s round trip and externally retained evidence
-are still required before marking the logical restore validation gate complete.
+**2026-10-17 validation:** automation discovery passed **111 tests, 11 opt-in
+checks skipped**; the dedicated opt-in unittest workflow subsequently passed
+**all 17 tests with no skips**. The standalone live drill passed on disposable K3s
+`v1.35.1+k3s1` with PostgreSQL `18.6`: all fixture/Flyway/schema/sequence checks
+passed, with backup **0.207 s** and restore **0.216 s**. The retained dump's SHA-256
+is `f5b2485d5353db839290f922e0876c42d0b30d6df85ec022189c3ab3d6029749`;
+its checksum and the matching schema files were independently checked. A
+missing-backend-image attempt also failed within the readiness bound and cleaned
+its owned namespace. Neither run used any live application database or PVC.
+
+Artifacts/evidence are at
+`/tmp/platform-backup-validation/backup-drill-nwa9agpk` **in this task environment
+only**, not durable publication. Archive that run directory externally before
+the environment expires, or repeat the runbook on the intended disposable target.
+Durably retained target-cluster evidence is still required before closing the
+logical restore validation gate; these tiny-fixture timings are not RPO/RTO.
 The separate GitOps synchronization/rollback live-validation blocker below
 remains open; this drill does not resolve it.
 

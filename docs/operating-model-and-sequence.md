@@ -49,7 +49,8 @@ The next delivery sequence is:
    required. See the [GitOps runbook](../infra/README.md#disposable-k3s-gitops-deployment-and-frontend-rollback).
 3. Validate backup and restore, including recovery evidence.
    An opt-in [disposable K3s logical round-trip drill](../infra/README.md#disposable-k3s-logical-backuprestore)
-   is implemented; a successful run and retained evidence remain required.
+   is implemented and a task-local round trip passed; durably retained
+   target-cluster evidence remains required.
    This is not PITR, HA, or production recovery validation.
 4. Measure capacity with explicit workload and concurrency targets.
 

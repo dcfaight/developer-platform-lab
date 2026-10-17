@@ -79,6 +79,15 @@ class BackupRestoreSafetyTests(unittest.TestCase):
             args = drill.configuration(self.arguments(temporary), {"PLATFORM_BACKUP_RESTORE_TEST": "true"})
             self.assertEqual(Path(temporary).resolve(), args.artifacts)
 
+    def test_missing_or_option_like_context_is_rejected(self):
+        for context in ("", "  ", "--current-context"):
+            with self.subTest(context=context), self.assertRaises(drill.DrillError):
+                arguments = self.arguments("/tmp")
+                arguments[arguments.index("--context") + 1] = context
+                if context.startswith("-"):
+                    arguments[1:3] = ["--context=" + context]
+                drill.configuration(arguments, {"PLATFORM_BACKUP_RESTORE_TEST": "true"})
+
     def test_resources_never_reference_live_storage_services_or_worker_identity(self):
         resources = drill.resources("backup-drill-test", "token", "generated-test-value")
         self.assertEqual(["NetworkPolicy", "Pod", "Pod"], [r["kind"] for r in resources])
@@ -96,6 +105,8 @@ class BackupRestoreSafetyTests(unittest.TestCase):
             self.assertEqual([{"name": "data", "emptyDir": {"sizeLimit": "1Gi"}}], spec["volumes"])
             self.assertEqual(900, spec["activeDeadlineSeconds"])
             self.assertEqual(["-c", "listen_addresses=127.0.0.1"], spec["containers"][0]["args"])
+            self.assertEqual(["pg_isready", "-h", "127.0.0.1", "-U", "drill", "-d", "drill"],
+                             spec["containers"][0]["readinessProbe"]["exec"]["command"])
         self.assertEqual(["postgres"], [c["name"] for c in target["spec"]["containers"]])
         migrator = source["spec"]["containers"][1]
         environment = {entry["name"]: entry["value"] for entry in migrator["env"]}
@@ -103,6 +114,7 @@ class BackupRestoreSafetyTests(unittest.TestCase):
         self.assertEqual("false", environment["PLATFORM_WORKER_ENABLED"])
         self.assertEqual("false", environment["WORKER_ENABLED"])
         self.assertEqual("jdbc:postgresql://127.0.0.1:5432/drill", environment["DB_URL"])
+        self.assertEqual("60000", environment["SPRING_DATASOURCE_HIKARI_INITIALIZATION_FAIL_TIMEOUT"])
         serialized = json.dumps(resources)
         for forbidden in ("persistentVolumeClaim", "hostPath", '"namespace": "platform-lab"', "platform-secrets",
                           "platform-config", "postgres-data", "platform-worker"):
@@ -185,6 +197,20 @@ class BackupRestoreSafetyTests(unittest.TestCase):
             self.assertEqual("pod-startup", evidence["failed_stage"])
             self.assertEqual("failed-inspect-owned-namespace", evidence["cleanup"])
 
+    def test_schema_normalization_uses_only_source_scratch_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            instance = drill.Drill(SimpleNamespace(context="disposable", artifacts=Path(directory)))
+            with patch.object(instance, "schema", side_effect=[b"original-ddl", b"normalized-ddl"]) as schema, \
+                    patch.object(instance, "sql") as sql:
+                self.assertEqual(b"normalized-ddl", instance.normalized_source_schema())
+                self.assertEqual([unittest.mock.call("source"),
+                                  unittest.mock.call("source", database="schema_reference")],
+                                 schema.call_args_list)
+                self.assertEqual([
+                    unittest.mock.call("source", "CREATE DATABASE schema_reference;"),
+                    unittest.mock.call("source", "original-ddl", database="schema_reference"),
+                ], sql.call_args_list)
+
     def test_complete_command_trace_only_mutates_drill_resources_and_emits_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             instance = drill.Drill(SimpleNamespace(context="disposable", artifacts=Path(directory)))
@@ -244,7 +270,13 @@ class BackupRestoreSafetyTests(unittest.TestCase):
                         executable = args[args.index("--") + 1]
                         if executable == "psql":
                             sql = data.decode()
-                            if sql.startswith("BEGIN;"):
+                            if sql in ("CREATE DATABASE schema_reference;", "known-schema"):
+                                self.assertEqual("source", pod)
+                                database = args[args.index("-d") + 1]
+                                self.assertEqual("schema_reference" if sql == "known-schema" else "drill",
+                                                 database)
+                                output = b""
+                            elif sql.startswith("BEGIN;"):
                                 self.assertEqual("source", pod)
                                 self.assertEqual(drill.fixture_sql(), sql)
                                 output = b""
@@ -292,6 +324,9 @@ class BackupRestoreSafetyTests(unittest.TestCase):
             for forbidden in ("drill-user", "shared-key", "DB_PASSWORD", "POSTGRES_PASSWORD"):
                 self.assertNotIn(forbidden, json.dumps(evidence))
             self.assertEqual(0o600, (instance.directory / "fixture.dump").stat().st_mode & 0o777)
+            for name in ("source-schema.sql", "restore-schema.sql"):
+                self.assertEqual(b"known-schema", (instance.directory / name).read_bytes())
+                self.assertEqual(0o600, (instance.directory / name).stat().st_mode & 0o777)
 
 
 class BackupRestoreVerificationTests(unittest.TestCase):
@@ -319,7 +354,7 @@ class BackupRestoreVerificationTests(unittest.TestCase):
 
     def test_any_restored_column_schema_sequence_or_flyway_change_fails(self):
         for table in (*drill.TABLES, "sequence_state", "schema"):
-            with self.subTest(table=table), self.assertRaises(drill.DrillError):
+            with self.subTest(table=table), self.assertRaises(drill.VerificationError) as raised:
                 restored = valid_snapshot()
                 if table == "sequence_state":
                     restored[table]["last_value"] = 1
@@ -327,6 +362,7 @@ class BackupRestoreVerificationTests(unittest.TestCase):
                     restored[table][0]["unexpected"] = "changed"
                 drill.verify_restore(valid_snapshot(), restored, b"schema",
                                      b"different" if table == "schema" else b"schema")
+            self.assertFalse(raised.exception.results[table])
 
     def test_failed_incomplete_or_wrong_migration_history_fails(self):
         for field, value in (("success", False), ("checksum", None), ("version", "99"),

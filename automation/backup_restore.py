@@ -26,6 +26,12 @@ class DrillError(RuntimeError):
     pass
 
 
+class VerificationError(DrillError):
+    def __init__(self, results):
+        super().__init__("Restored data, sequence state or schema differs")
+        self.results = results
+
+
 def configuration(arguments=None, environ=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--confirm-disposable", action="store_true")
@@ -61,7 +67,7 @@ def resources(namespace, token, password):
         "resources": {"requests": {"cpu": "100m", "memory": "128Mi"},
                       "limits": {"cpu": "1", "memory": "512Mi"}},
         "readinessProbe": {
-            "exec": {"command": ["pg_isready", "-U", "drill", "-d", "drill"]},
+            "exec": {"command": ["pg_isready", "-h", "127.0.0.1", "-U", "drill", "-d", "drill"]},
             "periodSeconds": 2, "timeoutSeconds": 2,
         },
     }
@@ -72,7 +78,7 @@ def resources(namespace, token, password):
             "SPRING_PROFILES_ACTIVE": "deploy",
             "DB_URL": "jdbc:postgresql://127.0.0.1:5432/drill",
             "DB_USERNAME": "drill", "DB_PASSWORD": password,
-            "SPRING_FLYWAY_CONNECT_RETRIES": "30",
+            "SPRING_DATASOURCE_HIKARI_INITIALIZATION_FAIL_TIMEOUT": "60000",
             "PLATFORM_WORKER_ENABLED": "false", "WORKER_ENABLED": "false",
         }.items()],
         "resources": {"requests": {"cpu": "100m", "memory": "256Mi"},
@@ -174,9 +180,11 @@ def verify_fixture(snapshot):
 def verify_restore(source, restored, source_schema, restored_schema):
     verify_fixture(source)
     verify_fixture(restored)
-    if source != restored or source_schema != restored_schema:
-        raise DrillError("Restored data, sequence state or schema differs")
-    return {table: True for table in (*TABLES, "schema", "sequence_state")}
+    results = {table: source[table] == restored[table] for table in (*TABLES, "sequence_state")}
+    results["schema"] = source_schema == restored_schema
+    if not all(results.values()):
+        raise VerificationError(results)
+    return results
 
 
 class Drill:
@@ -200,10 +208,10 @@ class Drill:
             # Do not expose command output, SQL, credentials or server error bodies.
             raise DrillError("Kubernetes command failed or timed out; inspect drill-owned resources") from None
 
-    def sql(self, pod, sql):
+    def sql(self, pod, sql, database="drill"):
         return self.kubectl("-n", self.namespace, "exec", "-i", pod, "-c", "postgres", "--",
                             "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "drill",
-                            "-d", "drill", data=sql.encode())
+                            "-d", database, data=sql.encode())
 
     def snapshot(self, pod):
         result = {}
@@ -216,10 +224,17 @@ class Drill:
                  "(SELECT last_value, is_called FROM operation_events_id_seq) s;"))
         return result
 
-    def schema(self, pod):
+    def schema(self, pod, database="drill"):
         return self.kubectl("-n", self.namespace, "exec", pod, "-c", "postgres", "--",
-                            "pg_dump", "-U", "drill", "-d", "drill", "--schema-only",
+                            "pg_dump", "-U", "drill", "-d", database, "--schema-only",
                             "--no-owner", "--no-privileges", "--restrict-key=" + SCHEMA_KEY)
+
+    def normalized_source_schema(self):
+        original = self.schema("source")
+        # PostgreSQL reparses array casts on restore; compare server-normalized DDL.
+        self.sql("source", "CREATE DATABASE schema_reference;")
+        self.sql("source", original.decode(), database="schema_reference")
+        return self.schema("source", database="schema_reference")
 
     def identity(self, pod):
         resource = json.loads(self.kubectl("-n", self.namespace, "get", "pod", pod, "-o", "json"))
@@ -273,7 +288,10 @@ class Drill:
             self.sql("source", fixture_sql())
             source = self.snapshot("source")
             verify_fixture(source)
-            source_schema = self.schema("source")
+            source_schema = self.normalized_source_schema()
+            source_schema_path = self.directory / "source-schema.sql"
+            source_schema_path.write_bytes(source_schema)
+            os.chmod(source_schema_path, 0o600)
             stage = "backup"
             backup = self.directory / "fixture.dump"
             start = time.monotonic()
@@ -296,11 +314,17 @@ class Drill:
                          data=backup.read_bytes(), timeout=120)
             self.evidence["restore_seconds"] = round(time.monotonic() - start, 3)
             stage = "verification"
+            restored_schema = self.schema("restore")
+            restored_schema_path = self.directory / "restore-schema.sql"
+            restored_schema_path.write_bytes(restored_schema)
+            os.chmod(restored_schema_path, 0o600)
             self.evidence["verification"] = verify_restore(
-                source, self.snapshot("restore"), source_schema, self.schema("restore"))
+                source, self.snapshot("restore"), source_schema, restored_schema)
             self.evidence["schema_sha256"] = hashlib.sha256(source_schema).hexdigest()
             self.evidence["status"] = "passed"
-        except BaseException:
+        except BaseException as error:
+            if isinstance(error, VerificationError):
+                self.evidence["verification"] = error.results
             self.evidence["failed_stage"] = stage
             raise
         finally:
