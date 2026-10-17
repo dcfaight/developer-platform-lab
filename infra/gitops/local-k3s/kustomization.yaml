@@ -3,6 +3,13 @@ kind: Kustomization
 namespace: platform-lab
 resources:
   - ../../kubernetes
+images:
+  - name: platform-lab-backend
+    newName: docker.io/library/platform-lab-backend
+    digest: sha256:2db7b4fef29ee83dfc0aa5e5bba919f306064829b0217a6a12875065072df8cc
+  - name: platform-lab-frontend
+    newName: docker.io/library/platform-lab-frontend
+    digest: sha256:26df98226d67ae71a5d3623abeecb43fefd636c4fe5569ed00fe95d880861565
 patches:
   - patch: |
       apiVersion: v1

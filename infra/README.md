@@ -652,7 +652,8 @@ Ownership is deliberately split:
 The AppProject has no allowed cluster-scoped kinds and only the four platform
 resource kinds above. The controller/server get a Role in `platform-lab`, with
 no delete, Secret, PVC, namespace, or RBAC permissions there. The registered
-destination is namespace-limited. Automatic pruning is disabled; there is no
+destination is namespace-limited for this entire dedicated Argo CD instance.
+Automatic pruning is disabled; there is no
 Application deletion finalizer or automatic namespace creation. Do not enable
 `Replace`, `Force`, pruning, cascading deletion, or wildcard privileges to resolve
 a sync failure. Generated ConfigMaps retain their content hashes so configuration
@@ -737,9 +738,9 @@ catalog, and import on the K3s node:
 # ARTIFACTS is an absolute directory outside the checkout containing the archives.
 sha256sum "$ARTIFACTS/platform-frontend-a.tar" "$ARTIFACTS/platform-frontend-b.tar" "$ARTIFACTS/platform-backend.tar"
 # Compare each checksum with releases.json before importing.
-sudo k3s ctr images import --digests "$ARTIFACTS/platform-frontend-a.tar"
-sudo k3s ctr images import --digests "$ARTIFACTS/platform-frontend-b.tar"
-sudo k3s ctr images import --digests "$ARTIFACTS/platform-backend.tar"
+sudo k3s ctr images import --digests --base-name docker.io/library/platform-lab-frontend "$ARTIFACTS/platform-frontend-a.tar"
+sudo k3s ctr images import --digests --base-name docker.io/library/platform-lab-frontend "$ARTIFACTS/platform-frontend-b.tar"
+sudo k3s ctr images import --digests --base-name docker.io/library/platform-lab-backend "$ARTIFACTS/platform-backend.tar"
 sudo k3s ctr images ls
 ```
 
@@ -759,13 +760,20 @@ release. To produce a new reviewed artifact set from a clean committed checkout:
 SOURCE_REVISION="$(git -C "$ROOT" rev-parse HEAD)"
 test -z "$(git -C "$ROOT" status --porcelain)"
 docker buildx create --name platform-releases --driver docker-container
+# Optional: use only an administrator-provided trusted proxy root CA.
+BUILD_TRUST=()
+if [ -n "${BUILD_CA_FILE:-}" ]; then
+  BUILD_TRUST=(--secret "id=build_ca,src=$BUILD_CA_FILE")
+fi
 for RELEASE in a b; do
   docker buildx build --builder platform-releases --platform linux/amd64 \
+    "${BUILD_TRUST[@]}" \
     --provenance=false --build-arg SOURCE_REVISION="$SOURCE_REVISION" \
     --build-arg RELEASE_ID="gitops-$RELEASE" \
     --output "type=oci,dest=$ARTIFACTS/platform-frontend-$RELEASE.tar" "$ROOT/frontend"
 done
 docker buildx build --builder platform-releases --platform linux/amd64 \
+  "${BUILD_TRUST[@]}" \
   --provenance=false --output "type=oci,dest=$ARTIFACTS/platform-backend.tar" "$ROOT/backend"
 tar -xOf "$ARTIFACTS/platform-frontend-a.tar" index.json | jq .
 sha256sum "$ARTIFACTS/"*.tar
@@ -776,6 +784,8 @@ digest, source revision and platform in a reviewed catalog update; update the
 target image references together. OCI identity is byte-precise; these builds
 are not claimed to be byte-for-byte reproducible. Do not garbage-collect the
 previous artifacts until their rollback window expires.
+The optional `build_ca` BuildKit secret establishes build-time npm/Maven trust
+without disabling TLS verification or copying a private key into an image.
 
 ### Git-driven frontend upgrade and rollback drill
 
@@ -834,6 +844,11 @@ The offline GitOps contract tests render both targets and check ownership,
 non-pruning behavior, permissions and pinning. Run with existing unittest
 discovery; the live drill is skipped unless explicitly enabled. Controller
 installation rendering requires access to the commit-pinned upstream URL.
+Set `PLATFORM_GITOPS_ARTIFACTS` to the absolute archive directory to additionally
+verify archive checksums, manifest/config digests and embedded frontend identity.
+After bootstrap, `PLATFORM_GITOPS_ACCESS_TEST=true` with
+`PLATFORM_K3S_CONTEXT` enables read-only impersonation checks for both controller
+and server permission boundaries; the operator needs impersonation permission.
 
 **2026-10-17:** a disposable K3s v1.35.1+k3s1 node was started for validation,
 and the pinned CRDs and namespace-scoped Argo CD resources applied successfully.
@@ -844,3 +859,17 @@ operator must complete the drill and retain its evidence before marking the
 roadmap acceptance boundary complete. Registry publication, multi-node artifact
 distribution, backend/schema rollback, backup recovery and production readiness
 remain excluded.
+Both frontend OCI archives and the fixed backend archive were successfully
+built from source revision `2c2e05c7765a7481883936af6a8700028c085cea`,
+using the environment's trusted proxy CA via BuildKit secrets. Archive hashes,
+manifest/config digests and frontend release identities were verified against
+the catalog. They are retained at `/tmp/platform-frontend-a.tar`,
+`/tmp/platform-frontend-b.tar` and `/tmp/platform-backend.tar` in this task
+environment only: **this is not durable artifact publication**. Copy them to
+operator-managed storage before this environment expires, or build and review
+a new artifact set and update the catalog/target. Do not interpret the committed
+digests as downloadable registry artifacts.
+The three exact catalog image references were also imported and verified in the
+disposable node's containerd store. For the containerized K3s validation node,
+the CLI was `ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io`
+instead of the host installation's `k3s ctr` wrapper.
