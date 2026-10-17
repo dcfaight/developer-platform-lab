@@ -86,15 +86,33 @@ class KubernetesEnvironmentProvisionerTests {
         assertEquals(8080, container.getPorts().get(0).getContainerPort());
         assertNotNull(container.getReadinessProbe().getHttpGet());
         assertNotNull(container.getLivenessProbe().getHttpGet());
+        assertEquals("50m", container.getResources().getRequests().get("cpu").toString());
+        assertEquals("32Mi", container.getResources().getRequests().get("memory").toString());
+        assertEquals("250m", container.getResources().getLimits().get("cpu").toString());
         assertEquals("128Mi", container.getResources().getLimits().get("memory").toString());
         assertEquals("2", resourceQuota.getSpec().getHard().get("requests.cpu").toString());
         assertEquals("2Gi", resourceQuota.getSpec().getHard().get("requests.memory").toString());
+        assertEquals("4", resourceQuota.getSpec().getHard().get("limits.cpu").toString());
+        assertEquals("4Gi", resourceQuota.getSpec().getHard().get("limits.memory").toString());
         assertEquals("10", resourceQuota.getSpec().getHard().get("pods").toString());
         assertEquals("100m", limitRange.getSpec().getLimits().get(0).getDefaultRequest().get("cpu").toString());
+        assertEquals("64Mi", limitRange.getSpec().getLimits().get(0).getDefaultRequest().get("memory").toString());
         assertEquals("500m", limitRange.getSpec().getLimits().get(0).getDefault().get("cpu").toString());
+        assertEquals("256Mi", limitRange.getSpec().getLimits().get(0).getDefault().get("memory").toString());
         assertEquals("1", limitRange.getSpec().getLimits().get(0).getMax().get("cpu").toString());
+        assertEquals("1Gi", limitRange.getSpec().getLimits().get(0).getMax().get("memory").toString());
         assertTrue(container.getResources().getRequests().get("cpu")
+                .compareTo(resourceQuota.getSpec().getHard().get("requests.cpu")) < 0);
+        assertTrue(container.getResources().getRequests().get("memory")
+                .compareTo(resourceQuota.getSpec().getHard().get("requests.memory")) < 0);
+        assertTrue(container.getResources().getLimits().get("cpu")
+                .compareTo(resourceQuota.getSpec().getHard().get("limits.cpu")) < 0);
+        assertTrue(container.getResources().getLimits().get("memory")
+                .compareTo(resourceQuota.getSpec().getHard().get("limits.memory")) < 0);
+        assertTrue(container.getResources().getLimits().get("cpu")
                 .compareTo(limitRange.getSpec().getLimits().get(0).getMax().get("cpu")) < 0);
+        assertTrue(container.getResources().getLimits().get("memory")
+                .compareTo(limitRange.getSpec().getLimits().get(0).getMax().get("memory")) < 0);
         assertTrue(container.getSecurityContext().getReadOnlyRootFilesystem());
         assertFalse(container.getSecurityContext().getAllowPrivilegeEscalation());
         assertFalse(pod.getAutomountServiceAccountToken());
