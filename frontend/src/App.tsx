@@ -20,11 +20,11 @@ function App() {
       event.preventDefault()
       document.getElementById('main-content')?.focus()
     }}>Skip to content</a>
-    <header className="site-header"><a href="#environments" className="brand">DPL <span>Developer Platform Lab</span></a>
+    <header className="site-header"><a href="#environments" className="brand">IDP <span>Internal Developer Platform</span></a>
       <nav aria-label="Primary navigation"><a className="create-link" href="#create">Create environment</a>
         <span className="read-only">Trusted local portal</span></nav></header>
     <main id="main-content" tabIndex={-1}>
-      <div className="intro"><p className="eyebrow">Local development platform</p>
+      <div className="intro"><p className="eyebrow">Internal Developer Platform</p>
         <h1>Environment control room</h1>
         <p>Follow environment readiness, operation progress, and failures in one place.</p>
         <p className="muted">Status refreshes every 10 seconds. All times are shown in your local timezone.</p>
@@ -34,7 +34,7 @@ function App() {
         : creating ? <CreateEnvironment />
           : <EnvironmentList page={page} onPageChange={setPage} />}
     </main>
-    <footer>Work-in-progress portfolio blueprint · Trusted local use only · Operator sign-in required for changes · Not production hardened</footer>
+    <footer>Trusted local use only · Operator sign-in required for changes · Not production hardened</footer>
   </div>
 }
 

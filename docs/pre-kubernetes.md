@@ -43,7 +43,7 @@ context and a loopback HTTPS API server. It provisions platform-owned namespaces
 and the fixed, approved `sample-service` Deployment, not the platform itself.
 Readiness must be observed before `READY`; safe deletion checks ownership and
 waits for namespace absence before `DELETED`. Arbitrary manifests/images and
-remote clusters are deliberately unsupported. See the [kind lab](../infra/README.md#local-kind-lab).
+remote clusters are deliberately unsupported. See the [local kind development cluster](../infra/README.md#local-kind-development-cluster).
 
 The separately prepared **local single-node K3s cluster** is the planned platform
 deployment target. Its successful NGINX/port-forward smoke test (demo since

@@ -48,6 +48,12 @@ function stubCreationKey(...keys: string[]) {
 }
 
 describe('portal', () => {
+  it('uses the Internal Developer Platform brand', () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(paged([]))))
+    render(<App />)
+    expect(screen.getByRole('link', { name: 'IDP Internal Developer Platform' })).toBeTruthy()
+  })
+
   it('shows loading and a useful empty state without write actions', async () => {
     let resolve!: (response: Response) => void
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((done) => { resolve = done })))

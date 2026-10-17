@@ -1,6 +1,9 @@
-# Developer Platform Lab
+# Internal Developer Platform (IDP)
 
-A hands-on internal developer platform for provisioning development environments, deploying a sample application, and understanding operational status through a self-service portal.
+An Internal Developer Platform for provisioning and operating software lifecycle
+environments through a self-service portal. The target architecture supports
+approximately 3,000 developers and separate production continuity sites; see
+the [Phase B architecture decision](docs/decisions/phase-b-target-architecture.md).
 
 > **Project status:** Persistent requests support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal supports create → observe → delete, with confirmation and ownership-checked asynchronous namespace removal. Manual API-driven expiration cleanup is available, dry-run by default. Mutations require HTTP Basic sign-in for locally configured `OPERATOR`/`CLEANUP` accounts, and audit events record the authenticated user; reads stay anonymous. A separate API-only container deployment now provides a TLS portal, non-root restricted app containers, private networking, and database-aware readiness. SSO, ownership/team authorization, continuous workload health monitoring, and production Kubernetes deployment remain unimplemented. This is production-minded hardening, not overall production readiness.
 >
@@ -20,8 +23,9 @@ A hands-on internal developer platform for provisioning development environments
 | Loading/error/retry states, sanitized failures, and request correlation | Custom templates/images, Services, and ingress |
 
 **Start here:** [local demo and troubleshooting runbook](docs/demo.md) for the
-repeatable request → provision → observe → delete walkthrough, safe replay, and manual
-lab reset. See [backend setup](backend/README.md#run-locally) and
+repeatable request → provision → observe → delete walkthrough, safe replay, and
+manual reset of the disposable local environment. See
+[backend setup](backend/README.md#run-locally) and
 [frontend setup](frontend/README.md) for service-specific commands.
 For the separate single-host **API-only** container path, use the
 [deployment runbook](infra/README.md#hardened-single-host-deployment-api-only).
@@ -29,7 +33,8 @@ It does not replace the host-run kind demo: container provisioning is disabled.
 
 ## 1. Project Purpose
 
-Developer Platform Lab explores how a platform engineering team can reduce friction in the software development lifecycle.
+The Internal Developer Platform helps developers request and operate environments
+throughout the software development lifecycle.
 
 The platform will let a developer:
 
@@ -40,7 +45,9 @@ The platform will let a developer:
 5. Delete the environment.
 6. Allow expired environments to be cleaned up automatically.
 
-The project prioritizes working infrastructure, understandable failures, and safe automation over a large feature list.
+The platform prioritizes working infrastructure, understandable failures, and
+safe automation over a large feature list. Its target architecture is documented
+separately from currently implemented and validated capabilities.
 
 ## 2. Goals
 
@@ -54,17 +61,18 @@ The project prioritizes working infrastructure, understandable failures, and saf
 
 ### Initial non-goals
 
-The first release will not include:
+The current implementation does not yet include:
 
-- Production workloads or production-grade availability.
+- Production workloads or validated production-grade availability.
 - Public internet exposure.
 - Strong isolation between untrusted tenants.
-- Multi-cluster or multi-cloud orchestration.
+- Multi-cluster production orchestration.
 - Arbitrary user-provided container images or Kubernetes manifests.
 - A replacement for a CI/CD system.
 - AI-generated automated remediation.
 
-These boundaries keep the first version achievable and its security assumptions explicit.
+These boundaries describe the current implementation, not a change to the
+target architecture. They keep current security assumptions explicit.
 
 ## 3. Primary User Journey
 
@@ -248,6 +256,9 @@ developer-platform-lab/
 └── README.md
 ```
 
+The existing repository name is retained for compatibility; other legacy
+technical identifiers are listed in the [Phase B architecture decision](docs/decisions/phase-b-target-architecture.md).
+
 This is a planned structure. Directories will be introduced as their functionality is implemented.
 
 ### Initial scaffold
@@ -269,10 +280,10 @@ workflow differs from the local K3s target. First-pass
 [K3s packaging and setup](infra/README.md#local-k3s-platform)
 now covers the UI, API, PostgreSQL persistence, local TLS ingress, and an explicit
 in-cluster worker with projected credentials and dedicated RBAC. After PR #14,
-[manual K3s lifecycle validation passed on the disposable lab cluster](infra/README.md#recorded-lifecycle-validation--2026-10-16):
-create → ready → authenticated delete → namespace cleanup. This lab goal is
-complete; production readiness, backup/restore, and restart persistence are not
-implied. Automated lifecycle validation remains opt-in.
+[manual K3s lifecycle validation passed on the disposable K3s cluster](infra/README.md#recorded-lifecycle-validation--2026-10-16):
+create → ready → authenticated delete → namespace cleanup. This local validation
+goal is complete; production readiness, backup/restore, and restart persistence
+are not implied. Automated lifecycle validation remains opt-in.
 
 ## 8. Domain Model
 
