@@ -1,7 +1,7 @@
 # Operating Model and Delivery Sequence
 
 **Canonical current status and roadmap.** Last reviewed October 17, 2026,
-against `main` at `4d859482810a37ec53571d81e1b87a29ace256f2` (after PR #27
+against `main` at `820f7463d8834866ba4901cb355bf973ec9505f7` (after PR #28
 merged). Update this document when implementation or validation evidence
 changes; README and runbooks provide entry points and execution details, not
 competing status matrices.
@@ -32,7 +32,7 @@ ephemeral task environment; it does not mean the artifact is durably retained.
 
 ## Current delivery gates
 
-This is the durable roadmap record after PR #27, not a claim of new validation.
+This is the durable roadmap record after PR #28, not a claim of new validation.
 The next priorities are **GITOPS-01 → PERSIST-01 → CAPACITY-01 → ARCH-01**;
 the other open acceptance gates remain recorded here. “Evidence pending” means
 validation or durable retention is still required; no recorded blocker does not
@@ -58,8 +58,24 @@ production changes:
 1. Select a healthy disposable target, verify image/artifact availability, and
    choose an operator-managed durable evidence location. Do not weaken TLS,
    access controls, or ownership checks.
-2. Resolve the recorded GitOps image-download blocker and run the Git-driven
-   frontend upgrade/revert drill with retained evidence.
+2. Complete **GITOPS-01**, the next focused implementation/validation increment,
+   using the [live drill and evidence handoff](../infra/README.md#git-driven-frontend-upgrade-and-rollback-drill):
+   - Resolve the recorded `cdn01.quay.io` DNS/image-download blocker and verify
+     controller startup and exact artifact availability on the disposable K3s
+     target. The prior blocked attempt and offline tests are not successful
+     live-validation evidence.
+   - Retain one successful run showing three distinct synchronized Git commits:
+     baseline → frontend upgrade → new revert commit. Each phase must be
+     `Synced`, `Healthy`, and operation `Succeeded`, with the expected desired
+     and runtime frontend digests and served release identity.
+   - Require unchanged backend/PostgreSQL specs, Deployment/pod UIDs and restart
+     counts, PVC/Secret UIDs, Flyway history, and authenticated environment and
+     operation history, with backend database readiness `UP`.
+   - Close the gate only after the passing evidence JSON, test log, release
+     catalog and commit references are retained in operator-managed storage
+     outside the task environment, alongside the rollback artifacts. Record
+     target, date, checked-out revision, outcome and sanitized durable evidence
+     reference in this roadmap. Until then, the gate remains open.
 3. Define and validate controlled same-PVC restart persistence with retained
    before/after evidence.
 4. Retain the initial 10-workflow/concurrency-2 capacity baseline, including cleanup.
@@ -72,6 +88,10 @@ as can persistence and capacity checks on a healthy target; inspect and resolve
 leftovers first. Reconcile the historical cleanup/demo evidence against current
 CI and review results separately. Documentation consolidation is complete;
 maintaining this roadmap remains ongoing.
+
+GITOPS-01 is opt-in and limited to a dedicated disposable single-node K3s
+target. It does not close restart persistence, backup recovery, or production
+continuity/readiness gates.
 
 ## Open decisions and deferred scope
 
