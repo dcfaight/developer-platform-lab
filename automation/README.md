@@ -1,5 +1,10 @@
 # Automation
 
+This is the tooling/runbook layer. Current status, remaining work, and blockers
+live in the [canonical roadmap table](../docs/operating-model-and-sequence.md#current-delivery-gates).
+Update implementation and validation separately there; preserve the historical
+evidence and explicit skipped/unknown states below.
+
 Python 3.12, standard library only. `cleanup_expired.py` requests asynchronous
 deletion through the **same backend API** as the portal. It never accesses SQL or
 Kubernetes. TTL timestamps alone do not start a daemon: cleanup happens only when

@@ -22,6 +22,9 @@ proprietary systems.
 Use the [Operating Model and Delivery Sequence](docs/operating-model-and-sequence.md)
 as the single authoritative current status, acceptance-gate, and priority list.
 This README is an entry point; it does not maintain a second status matrix.
+For the durable post-PR #27 remaining-work record, start with the
+[roadmap table](docs/operating-model-and-sequence.md#current-delivery-gates)
+and its proposed execution sequence.
 
 | Need | Document |
 |---|---|
