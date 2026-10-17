@@ -252,8 +252,14 @@ There is exactly one original `CREATE_ENVIRONMENT` operation per environment,
 enforced by a unique index. Claims reference that exact operation, with no
 oldest/latest-operation fallback. Missing or mismatched namespace ownership
 fails closed. CREATE execution checks its lease before starting and immediately
-before each namespace/Deployment create or replace. Existing legacy namespaces
-remain readable/reconcilable but are not assigned new create-operation ownership.
+before each namespace, resource-budget, LimitRange, or Deployment create or
+replace. New/retried CREATE work reconciles the owned
+`platform-environment-budget` ResourceQuota and `platform-container-defaults`
+LimitRange before the sample Deployment. See the
+[resource-budget runbook](../infra/README.md#provisioned-environment-resource-budgets)
+for exact limits and operator checks. Existing READY namespaces are not
+continuously reconciled or automatically migrated; legacy namespaces are not
+assigned new create-operation ownership.
 
 Database lease checks and Kubernetes requests are not one atomic transaction.
 A process can pause after its final lease check or leave an HTTP request in

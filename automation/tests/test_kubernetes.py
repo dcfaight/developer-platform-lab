@@ -56,6 +56,9 @@ class KubernetesConfigurationTests(unittest.TestCase):
             '    verbs: [get, create, delete]\n'
             '  - apiGroups: [apps]\n'
             '    resources: [deployments]\n'
+            '    verbs: [get, create, update]\n'
+            '  - apiGroups: [""]\n'
+            '    resources: [limitranges, resourcequotas]\n'
             '    verbs: [get, create, update]\n', rules)
         self.assertEqual(1, rbac.count("rules:"))
 
@@ -99,6 +102,12 @@ class KubernetesSmokeTests(unittest.TestCase):
             ("get", "deployments.apps", "worker-rbac-check", True),
             ("create", "deployments.apps", "worker-rbac-check", True),
             ("update", "deployments.apps", "worker-rbac-check", True),
+            ("get", "limitranges", "worker-rbac-check", True),
+            ("create", "limitranges", "worker-rbac-check", True),
+            ("update", "limitranges", "worker-rbac-check", True),
+            ("get", "resourcequotas", "worker-rbac-check", True),
+            ("create", "resourcequotas", "worker-rbac-check", True),
+            ("update", "resourcequotas", "worker-rbac-check", True),
             ("get", "secrets", "platform-lab", False),
             ("create", "pods/exec", "platform-lab", False),
             ("create", "rolebindings.rbac.authorization.k8s.io", "platform-lab", False),
@@ -106,6 +115,8 @@ class KubernetesSmokeTests(unittest.TestCase):
             ("list", "namespaces", None, False),
             ("delete", "deployments.apps", "worker-rbac-check", False),
             ("watch", "deployments.apps", "worker-rbac-check", False),
+            ("delete", "limitranges", "worker-rbac-check", False),
+            ("delete", "resourcequotas", "worker-rbac-check", False),
         ):
             with self.subTest(verb=verb, resource=resource):
                 arguments = ["kubectl", "--context", self.context, "auth", "can-i",

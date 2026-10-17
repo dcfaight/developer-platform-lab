@@ -3,7 +3,8 @@
 An Internal Developer Platform for provisioning and operating software lifecycle
 environments through a self-service portal. The target architecture supports
 approximately 3,000 developers and separate production continuity sites; see
-the [Phase B architecture decision](docs/decisions/phase-b-target-architecture.md).
+the [Phase B architecture decision](docs/decisions/phase-b-target-architecture.md)
+and [operating model and delivery sequence](docs/operating-model-and-sequence.md).
 
 > **Project status:** Persistent requests support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal supports create → observe → delete, with confirmation and ownership-checked asynchronous namespace removal. Manual API-driven expiration cleanup is available, dry-run by default. Mutations require HTTP Basic sign-in for locally configured `OPERATOR`/`CLEANUP` accounts, and audit events record the authenticated user; reads stay anonymous. A separate API-only container deployment now provides a TLS portal, non-root restricted app containers, private networking, and database-aware readiness. SSO, ownership/team authorization, continuous workload health monitoring, and production Kubernetes deployment remain unimplemented. This is production-minded hardening, not overall production readiness.
 >
@@ -16,7 +17,7 @@ the [Phase B architecture decision](docs/decisions/phase-b-target-architecture.m
 | Implemented now | Future work, not demo claims |
 |---|---|
 | Portal creation and guarded asynchronous deletion; durable requests and ownership checks | Production Kubernetes deployment and availability |
-| Opt-in leased worker provisioning an approved sample in local kind; manual expiration CLI | Scheduled expiration and continuous post-provisioning health monitoring |
+| Opt-in leased worker provisions an approved sample with per-namespace resource budgets in local kind; manual expiration CLI | Scheduled expiration and continuous post-provisioning health monitoring |
 | Portal with page-local status counts, creation, details, and durable operation timelines | SSO/OIDC, ownership/team RBAC, and multi-user hardening |
 | HTTP Basic sign-in for configured accounts; authenticated audit actor; TLS container portal | Read authorization, rate limiting, SSO, and account management |
 | Non-root read-only app containers, private API/database, health checks and limits | Certificate automation, external secrets, database HA/backup automation |

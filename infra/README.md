@@ -36,6 +36,57 @@ cleanup is available through the manually invoked API-only CLI, not a scheduler.
 Deleting the entire disposable kind cluster above is a separate manual cluster
 reset, not the platform deletion workflow.
 
+## Provisioned environment resource budgets
+
+During each provisioning attempt, the worker reconciles an owned
+`ResourceQuota/platform-environment-budget` and
+`LimitRange/platform-container-defaults` before creating or reconciling
+`Deployment/sample-service`. These controls apply to newly provisioned
+namespaces; they are not a continuous controller.
+
+The quota is per namespace:
+
+| Resource | Budget |
+|---|---:|
+| Total CPU requests | `2` cores |
+| Total memory requests | `2Gi` |
+| Total CPU limits | `4` cores |
+| Total memory limits | `4Gi` |
+| Pods | `10` |
+
+The container LimitRange supplies default requests of `100m` CPU and `64Mi`
+memory, defaults limits to `500m` CPU and `256Mi` memory, and caps one
+container at `1` CPU and `1Gi` memory. The approved sample explicitly requests
+`50m` CPU/`32Mi` memory and limits `250m` CPU/`128Mi` memory, below both the
+per-container maxima and namespace totals. These conservative starter budgets
+leave room for a small development workload; they are not capacity estimates
+for the target developer population.
+
+Inspect a provisioned namespace with:
+
+```sh
+kubectl --context kind-developer-platform-lab -n env-<id-without-hyphens> \
+  get resourcequota platform-environment-budget -o yaml
+kubectl --context kind-developer-platform-lab -n env-<id-without-hyphens> \
+  get limitrange platform-container-defaults -o yaml
+kubectl --context kind-developer-platform-lab -n env-<id-without-hyphens> \
+  describe resourcequota platform-environment-budget
+```
+
+The worker reconciles only resources carrying matching platform ownership
+labels and annotations, with lease checks before each create or replace and
+resourceVersion-guarded replacement. Conflicts are not adopted or overwritten;
+Kubernetes API failures use the existing sanitized operation failure handling.
+An already-READY namespace is **not** automatically migrated or continuously
+reconciled. No existing environment or shared cluster is changed by this
+increment; a future migration needs an explicit, reviewed operator procedure.
+
+Quotas limit aggregate resource consumption but are not a complete isolation or
+security boundary. They do not constrain network access, permissions, kernel
+sharing, or hostile workloads. The worker's existing cluster-scoped
+namespace `get/create/delete` permissions remain a separate, documented
+limitation; use only the dedicated disposable cluster described here.
+
 ## Hardened single-host deployment (API-only)
 
 This is a separate, opt-in Compose project, not an overlay on the developer
@@ -202,8 +253,9 @@ is mounted; the host-kind workflow and Compose deployment remain unchanged.
 Applying this version starts processing **existing pending operations** in its
 database as well as new requests. Review the backlog before upgrading.
 
-`worker-rbac.yaml` grants the dedicated `platform-worker` ServiceAccount only
-namespace `get/create/delete` and Deployment `get/create/update`. Dynamic
+`worker-rbac.yaml` grants the dedicated `platform-worker` ServiceAccount
+namespace `get/create/delete`, Deployment `get/create/update`, and
+ResourceQuota/LimitRange `get/create/update`. Dynamic
 namespaces require cluster-wide grants; Kubernetes RBAC cannot constrain these
 grants by ownership labels or an `env-` name prefix. Application ownership checks
 are not a security boundary against stolen worker credentials: a compromised

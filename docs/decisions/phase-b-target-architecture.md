@@ -56,3 +56,9 @@ Java package, the `platform-lab` Kubernetes namespace, and `platform_lab`
 database names. These are intentionally preserved for compatibility; this
 decision changes product language, not resource identities. Any future
 identifier migration should be planned and validated separately.
+
+## Operating model and delivery sequence
+
+The [operating model and delivery sequence](../operating-model-and-sequence.md)
+records how this target informs current implementation without resolving the
+remaining control-plane and recovery decisions.
