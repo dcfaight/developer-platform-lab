@@ -1,36 +1,45 @@
 # Internal Developer Platform (IDP)
 
 An Internal Developer Platform for provisioning and operating software lifecycle
-environments through a self-service portal. The target architecture supports
-approximately 3,000 developers and separate production continuity sites; see
-the [Phase B architecture decision](docs/decisions/phase-b-target-architecture.md)
-and [operating model and delivery sequence](docs/operating-model-and-sequence.md).
+environments through a self-service portal. The intended audience is approximately
+3,000 developers; this is not a measured capacity claim. The accepted target
+architecture records separate production-continuity sites, not deployed production
+clusters. See the [Phase B architecture decision](docs/decisions/phase-b-target-architecture.md).
 
-> **Project status:** Persistent requests support an opt-in asynchronous worker, leased PostgreSQL operations, local-kind namespace/sample-workload provisioning, and durable progress/failure reads. The React portal supports create → observe → delete, with confirmation and ownership-checked asynchronous namespace removal. Manual API-driven expiration cleanup is available, dry-run by default. All API reads and writes require HTTP Basic: `OPERATOR` has platform-wide access, `DEVELOPER` is limited to owned teams, and exclusive `CLEANUP` accounts have list/detail discovery and expiry-guarded deletion only. Audit events record the authenticated user; health probes remain anonymous. A separate API-only container deployment provides a TLS portal, non-root restricted app containers, private networking, and database-aware readiness. SSO, continuous workload health monitoring, and production-grade multi-tenant deployment remain unimplemented. This is production-minded hardening, not overall production readiness.
->
-> Except where marked as available now, this README preserves the intended architecture and delivery blueprint, not a claim that the full platform is implemented.
->
-> **Disclaimer:** This is an independent portfolio project inspired by platform engineering challenges. It is not an eBay product and does not reproduce eBay’s proprietary systems.
+> **Current scope:** Kubernetes deployment is implemented for a dedicated
+> disposable single-node K3s cluster. Manual create → `READY` → delete →
+> namespace-absence validation was recorded on October 16, 2026. GitOps, logical
+> backup/restore, and lifecycle-capacity tooling exist; their remaining evidence
+> gates are tracked in the [current roadmap](docs/operating-model-and-sequence.md).
+> This is not production readiness or measured support for 3,000 developers.
 
-## What works today / what is next
+**Disclaimer:** This is an independent portfolio project inspired by platform
+engineering challenges. It is not an eBay product and does not reproduce eBay’s
+proprietary systems.
 
-| Implemented now | Future work, not demo claims |
+## Documentation map
+
+Use the [Operating Model and Delivery Sequence](docs/operating-model-and-sequence.md)
+as the single authoritative current status, acceptance-gate, and priority list.
+This README is an entry point; it does not maintain a second status matrix.
+
+| Need | Document |
 |---|---|
-| Portal creation and guarded asynchronous deletion; durable requests and ownership checks | Production Kubernetes deployment and availability |
-| Opt-in leased worker provisions an approved sample with per-namespace resource budgets in local kind; manual expiration CLI | Scheduled expiration and continuous post-provisioning health monitoring |
-| Portal with page-local status counts, team-owned creation, details, and durable operation timelines | SSO/OIDC and stronger tenant isolation |
-| HTTP Basic for reads/writes; team authorization; authenticated audit actor; TLS container portal | Rate limiting, SSO, and account management |
-| Non-root read-only app containers, private API/database, health checks and limits | Certificate automation, external secrets, database HA/backup automation |
-| Loading/error/retry states, sanitized failures, and request correlation | Custom templates/images, Services, and ingress |
+| Current status, evidence gates, open decisions, and proposed priorities | [Operating Model and Delivery Sequence](docs/operating-model-and-sequence.md) |
+| Local request → provision → observe → delete walkthrough | [Demo and troubleshooting](docs/demo.md) |
+| kind, Compose, K3s, GitOps, and operational drill instructions/evidence | [Infrastructure guide](infra/README.md) |
+| Cleanup, logical restore, and capacity tooling | [Automation guide](automation/README.md) |
+| API contract | [API reference](docs/api.md) |
+| Accepted architecture decisions | [Decision records](docs/decisions/) |
+| Historical pre-Kubernetes assessment | [Archive notice](docs/pre-kubernetes.md) |
+| Backend and frontend setup/contracts | [Backend guide](backend/README.md) · [Frontend guide](frontend/README.md) |
 
-**Start here:** [local demo and troubleshooting runbook](docs/demo.md) for the
-repeatable request → provision → observe → delete walkthrough, safe replay, and
-manual reset of the disposable local environment. See
+**Start the local demo:** see [docs/demo.md](docs/demo.md), then the
 [backend setup](backend/README.md#run-locally) and
-[frontend setup](frontend/README.md) for service-specific commands.
-For the separate single-host **API-only** container path, use the
-[deployment runbook](infra/README.md#hardened-single-host-deployment-api-only).
-It does not replace the host-run kind demo: container provisioning is disabled.
+[frontend setup](frontend/README.md). The separate single-host
+[API-only container path](infra/README.md#hardened-single-host-deployment-api-only)
+does not replace the host-run kind lifecycle demo; container provisioning is
+disabled there.
 
 ## 1. Project Purpose
 
@@ -44,7 +53,8 @@ The platform will let a developer:
 3. Follow provisioning progress.
 4. View application readiness and diagnostic information.
 5. Delete the environment.
-6. Allow expired environments to be cleaned up automatically.
+6. Request safe cleanup for an expired environment through the operator-invoked
+   cleanup workflow.
 
 The platform prioritizes working infrastructure, understandable failures, and
 safe automation over a large feature list. Its target architecture is documented
@@ -122,13 +132,14 @@ for trusted-loopback commands, finite bounds, exit statuses, and failure policy.
 | Backend build | Maven Wrapper | Repeatable builds |
 | Persistence | PostgreSQL | Environments, operations, audit history |
 | Schema management | Flyway | Versioned database migrations |
-| Runtime | Local Kubernetes cluster using kind | Real provisioning target |
+| Runtime | Local kind and a dedicated single-node K3s deployment | Sample provisioning and platform deployment paths |
 | Local dependencies | Docker Compose | PostgreSQL and supporting services |
 | Automation | Python | Expiration and operational scripts |
 | Testing | JUnit, backend integration tests, frontend tests | Workflow confidence |
 | CI | GitHub Actions | Automated validation |
 
-Exact supported versions will be pinned during scaffolding.
+Supported tool and image versions are recorded in their build files and
+operational runbooks; they are not a capacity or production-support statement.
 
 The backend and worker initially live in one application, with separate packages and responsibilities. A separate worker deployment can be introduced later if justified.
 
@@ -239,9 +250,11 @@ developer-platform-lab/
 │   ├── src/test/
 │   └── pom.xml
 ├── automation/
+│   ├── README.md
 │   ├── cleanup_expired.py
 │   └── tests/
 ├── infra/
+│   ├── README.md
 │   ├── kind/
 │   └── kubernetes/
 ├── sample-app/
@@ -249,9 +262,10 @@ developer-platform-lab/
 │   ├── architecture.md
 │   ├── api.md
 │   ├── demo.md
+│   ├── operating-model-and-sequence.md
 │   ├── pre-kubernetes.md
 │   ├── decisions/
-│   └── runbooks/
+│   └── archive/
 ├── .github/workflows/
 ├── compose.yaml
 ├── .env.example
@@ -261,31 +275,20 @@ developer-platform-lab/
 The existing repository name is retained for compatibility; other legacy
 technical identifiers are listed in the [Phase B architecture decision](docs/decisions/phase-b-target-architecture.md).
 
-This is a planned structure. Directories will be introduced as their functionality is implemented.
+This tree is a navigation aid; use the documentation map above for current
+guidance and status.
 
-### Initial scaffold
+### Repository layout
 
-The directories above now have starter files or explicit placeholders.
 The backend base package is `io.github.dcfaight.platformlab`.
 The frontend provides an environment creation and status portal. The backend requires PostgreSQL and
 implements persistent environment creation/deletion requests and environment/operation
 reads, with Flyway migrations and durable idempotency. An opt-in worker provisions
-an approved sample workload only in the dedicated local kind cluster and safely
-removes owned namespaces. Expiration cleanup requires invoking the dry-run-first CLI;
-Kubernetes is not required for API-only acceptance and reads.
-Area README files describe the current scope.
-`docs/decisions/` and `docs/runbooks/` are reserved for future operational documentation.
-
-See the [Kubernetes deployment baseline and roadmap](docs/pre-kubernetes.md)
-for what exists today, what is still missing, and how the current host-run kind
-workflow differs from the local K3s target. First-pass
-[K3s packaging and setup](infra/README.md#local-k3s-platform)
-now covers the UI, API, PostgreSQL persistence, local TLS ingress, and an explicit
-in-cluster worker with projected credentials and dedicated RBAC. After PR #14,
-[manual K3s lifecycle validation passed on the disposable K3s cluster](infra/README.md#recorded-lifecycle-validation--2026-10-16):
-create → ready → authenticated delete → namespace cleanup. This local validation
-goal is complete; production readiness, backup/restore, and restart persistence
-are not implied. Automated lifecycle validation remains opt-in.
+an approved sample workload in local kind and safely removes owned namespaces.
+The separate K3s package deploys the platform itself. Manual K3s lifecycle
+validation was recorded on October 16, 2026; automated lifecycle, GitOps,
+logical-restore, capacity, and restart-persistence evidence gates remain in the
+[canonical roadmap](docs/operating-model-and-sequence.md).
 
 ## 8. Domain Model
 
@@ -426,16 +429,18 @@ Successful operations retain enough history to explain what happened.
 
 ## 11. Kubernetes Provisioning
 
-Each environment receives a platform-managed namespace containing:
+The current provisioned workload is one approved `sample-service` Deployment
+with resource requests/limits, readiness/liveness probes, and platform ownership
+metadata. It does not create a workload Service, Ingress, or NetworkPolicy.
+Platform Services and the platform TLS Ingress in the K3s package serve the
+portal/API; they are not workload exposure for provisioned environments.
 
-- A Deployment for the approved sample application.
-- An internal Service.
-- Configuration required by that application.
-- Resource requests and limits.
-- A ResourceQuota.
-- Readiness and liveness probes.
-- Platform ownership labels.
-- Network policies where supported by the selected cluster networking.
+The broader target blueprint has described environment resources as:
+
+- A Deployment and internal Service for an approved sample application.
+- Application configuration, resource requests and limits, and a ResourceQuota.
+- Readiness and liveness probes, platform ownership labels, and network policies
+  where supported by the selected cluster networking.
 
 Namespace separation alone is not a strong security boundary.
 
@@ -450,7 +455,8 @@ Namespace separation alone is not a strong security boundary.
 - Never store kubeconfig files or secrets in Git.
 - Do not accept arbitrary manifests from portal users.
 
-The initial demo accesses the sample application through a documented local port-forward workflow rather than public ingress.
+The local demo accesses the sample application through a documented port-forward
+workflow rather than public workload ingress.
 
 ## 12. Frontend Experience
 
@@ -582,9 +588,9 @@ With the worker disabled, the portal honestly shows `REQUESTED` / `PENDING`;
 enable the optional local-kind worker to observe provisioning and readiness.
 Expiry timestamps do not trigger cleanup. Ambiguous browser submissions can be
 retried with their stored key and payload in the same tab session; this does not
-cancel server work. This remains a work-in-progress
-portfolio blueprint, not production software. See [frontend/README.md](frontend/README.md)
-for navigation, testing, and deployment limitations.
+cancel server work. This is a bounded portfolio implementation, not production
+software; see the [current roadmap](docs/operating-model-and-sequence.md) and
+[frontend guide](frontend/README.md) for scope and limitations.
 The backend listens on http://127.0.0.1:8080 and applies Flyway migrations on
 startup. `DB_URL` defaults to
 `jdbc:postgresql://127.0.0.1:5432/platform_lab`, `DB_USERNAME` to `platform_lab`,
@@ -693,34 +699,10 @@ production-capacity claim; retained target-specific evidence is still required.
 
 ## 17. Delivery Roadmap
 
-### Milestone 1: Foundation
-
-- Scaffold frontend and backend.
-- Configure PostgreSQL and migrations.
-- Establish CI.
-- Define API contracts.
-
-### Milestone 2: First vertical slice
-
-- Create an environment from the portal.
-- Persist the operation.
-- Provision the sample workload.
-- Display readiness or failure.
-
-### Milestone 3: Safe lifecycle
-
-- Implement deletion (available; see the API contract and local runbook).
-- Add expiration cleanup (manual CLI available; scheduling deferred).
-- Test retries and worker restart recovery.
-- Add ownership safeguards.
-
-### Milestone 4: Portfolio polish
-
-- Improve accessibility and UI feedback.
-- Add operational documentation.
-- Complete integration tests.
-- Record a repeatable demo.
-- Document limitations and trade-offs.
+Current implementation, validation evidence, and remaining milestones are
+tracked only in the [Operating Model and Delivery Sequence](docs/operating-model-and-sequence.md).
+The journey and acceptance ideas below are descriptive blueprint material, not
+a second current status checklist.
 
 ### Later candidates
 
@@ -729,7 +711,7 @@ production-capacity claim; retained target-specific evidence is still required.
 - Service catalog and ownership.
 - Multiple approved templates.
 - Deployment versions and history.
-- GitOps integration.
+- Broader GitOps promotion beyond the bounded local frontend rollback drill.
 - AI-assisted diagnosis using sanitized evidence.
 - Multi-cluster support.
 
