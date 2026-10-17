@@ -469,7 +469,11 @@ VALUES ('alice', 'payments') ON CONFLICT DO NOTHING;
 COMMIT;
 ```
 
-`alice` must separately be a configured account with role `DEVELOPER`. `/me`
+`alice` must separately be a configured account with role `DEVELOPER`. Membership
+usernames **must match the configured account username spelling exactly**. Basic
+lookup may be case-insensitive, but returns the canonical configured spelling;
+database membership equality is exact. Use that spelling in trusted SQL rather
+than independently normalizing it. `/me`
 reports current memberships; revoking membership removes access to that team's
 environments, including history, operations and idempotent replay. No team or
 membership management API is added.

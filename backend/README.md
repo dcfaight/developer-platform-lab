@@ -137,7 +137,11 @@ COMMIT;
 ```
 
 Team IDs are lower-case slugs of 1–63 characters. `bob` must separately be a
-configured `DEVELOPER` account. Membership revocation removes team-scoped access,
+configured `DEVELOPER` account. Membership usernames **must match the configured
+account username spelling exactly**: Basic lookup may be case-insensitive, but
+returns the canonical configured spelling and database membership equality is
+exact. Use that spelling in trusted SQL; do not normalize it independently.
+Membership revocation removes team-scoped access,
 including replay; neither `createdBy` nor an old idempotency key grants access.
 There is no team/membership management API or automatic legacy adoption.
 

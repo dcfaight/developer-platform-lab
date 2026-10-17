@@ -1085,6 +1085,32 @@ class PlatformLabApplicationTests {
     }
 
     @Test
+    void concurrentScopedReservationsDeduplicateOnlyWithinTheSameAccountAndTeam() throws Exception {
+        seedTeams();
+        jdbc.update("INSERT INTO account_team_memberships VALUES (?, 'team-b')", TestUsers.DEVELOPER);
+        String teamA = teamPayload("Concurrent", "team-a");
+        String teamB = teamPayload("Concurrent", "team-b");
+        var responses = concurrentPosts("shared-concurrent-key",
+                List.of(teamA, teamA, teamA, teamA, teamB),
+                List.of(TestUsers.DEVELOPER, TestUsers.DEVELOPER, TestUsers.DEVELOPER,
+                        TestUsers.TEAMMATE, TestUsers.DEVELOPER));
+        for (var response : responses) {
+            assertEquals(202, response.status(), response.body());
+        }
+        assertEquals(responses.get(0).json(), responses.get(1).json());
+        assertEquals(responses.get(0).json(), responses.get(2).json());
+        assertEquals(3, responses.stream().map(response -> uuid(response.json(), "environmentId")).distinct().count());
+        assertEquals(3, responses.stream().map(response -> uuid(response.json(), "operationId")).distinct().count());
+        assertEquals(responses.get(0).json(), postAs(TestUsers.DEVELOPER, "shared-concurrent-key", teamA).json());
+        assertEquals(responses.get(3).json(), postAs(TestUsers.TEAMMATE, "shared-concurrent-key", teamA).json());
+        assertEquals(responses.get(4).json(), postAs(TestUsers.DEVELOPER, "shared-concurrent-key", teamB).json());
+        assertCounts(3);
+        assertEquals(Set.of(TestUsers.DEVELOPER + ":team-a", TestUsers.DEVELOPER + ":team-b",
+                TestUsers.TEAMMATE + ":team-a"), new HashSet<>(jdbc.queryForList(
+                        "SELECT scope FROM idempotency_requests", String.class)));
+    }
+
+    @Test
     void legacyEmptyScopeIsPreservedAndOnlyOperatorsCanReplayIt() throws Exception {
         seedTeams();
         var original = post("legacy-key", payload("Legacy", 1));
@@ -1217,12 +1243,17 @@ class PlatformLabApplicationTests {
     }
 
     private List<ApiResponse> concurrentPosts(String key, List<String> bodies) throws Exception {
+        return concurrentPosts(key, bodies, java.util.Collections.nCopies(bodies.size(), TestUsers.OPERATOR));
+    }
+
+    private List<ApiResponse> concurrentPosts(String key, List<String> bodies, List<String> usernames) throws Exception {
         var executor = Executors.newFixedThreadPool(bodies.size());
         CyclicBarrier barrier = new CyclicBarrier(bodies.size());
         try {
-            var tasks = bodies.stream().<java.util.concurrent.Callable<ApiResponse>>map(body -> () -> {
+            var tasks = java.util.stream.IntStream.range(0, bodies.size())
+                    .<java.util.concurrent.Callable<ApiResponse>>mapToObj(index -> () -> {
                 barrier.await(20, TimeUnit.SECONDS);
-                return post(key, body);
+                return postAs(usernames.get(index), key, bodies.get(index));
             }).toList();
             List<ApiResponse> responses = new ArrayList<>();
             for (var future : executor.invokeAll(tasks, 60, TimeUnit.SECONDS)) {
