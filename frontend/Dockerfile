@@ -12,7 +12,7 @@ RUN node -e 'require("node:fs").writeFileSync("dist/release.json", JSON.stringif
 
 FROM nginx:stable-alpine@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77552a7cfe9acfb3b5
 ARG SOURCE_REVISION=development
-LABEL org.opencontainers.image.source="https://github.com/dcfaight/developer-platform-lab" \
+LABEL org.opencontainers.image.source="https://github.com/dcfaight/internal-developer-platform" \
       org.opencontainers.image.revision="${SOURCE_REVISION}"
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY --from=build /build/dist /usr/share/nginx/html
