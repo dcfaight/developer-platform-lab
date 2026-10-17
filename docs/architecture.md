@@ -42,6 +42,9 @@ the authenticated username, and new idempotency reservations are caller/team-sco
 Trusted SQL administrators provision `platform_teams` and
 `account_team_memberships`; passwords/roles remain in account configuration.
 There is no expiration scheduler, periodic post-success health reconciliation,
-SSO, GitOps, ownership transfer, or production tenant isolation. Namespace
+SSO, workload GitOps, ownership transfer, or production tenant isolation. An
+opt-in Argo CD target now packages platform-service GitOps deployment and a
+frontend-only rollback drill; see the infrastructure runbook. Live rollback
+evidence is still required. Namespace
 ownership remains a resource-safety check, separate from team authorization;
 worker RBAC and ingress are unchanged.

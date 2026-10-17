@@ -1,6 +1,11 @@
 FROM maven:3.9.16-eclipse-temurin-17@sha256:c97d0fa42bed8c381518d76d7ca541ff5c6427b21fa93ac6fc4bd68ffb9a258d AS build
 WORKDIR /build
 COPY pom.xml ./
+RUN --mount=type=secret,id=build_ca \
+    if [ -f /run/secrets/build_ca ]; then \
+      keytool -importcert -noprompt -cacerts -storepass changeit \
+        -alias platform-build-ca -file /run/secrets/build_ca; \
+    fi
 RUN mvn --batch-mode dependency:go-offline
 COPY src src
 RUN mvn --batch-mode -DskipTests package

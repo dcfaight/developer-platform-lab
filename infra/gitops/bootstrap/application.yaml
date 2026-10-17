@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform-local
+  namespace: argocd
+spec:
+  sourceRepos:
+    - https://github.com/dcfaight/developer-platform-lab.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: platform-lab
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist:
+    - group: apps
+      kind: Deployment
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ConfigMap
+    - group: networking.k8s.io
+      kind: Ingress
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-local
+  namespace: argocd
+spec:
+  project: platform-local
+  source:
+    repoURL: https://github.com/dcfaight/developer-platform-lab.git
+    targetRevision: main
+    path: infra/gitops/local-k3s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform-lab
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - FailOnSharedResource=true

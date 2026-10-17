@@ -44,6 +44,9 @@ The next delivery sequence is:
    health remains anonymous. Identity-provider integration is not part of this
    increment.
 2. Establish reproducible GitOps deployment and rollback.
+   An opt-in, bounded Argo CD/K3s target and frontend rollback drill are
+   implemented; target-cluster synchronization and rollback evidence remain
+   required. See the [GitOps runbook](../infra/README.md#disposable-k3s-gitops-deployment-and-frontend-rollback).
 3. Validate backup and restore, including recovery evidence.
 4. Measure capacity with explicit workload and concurrency targets.
 

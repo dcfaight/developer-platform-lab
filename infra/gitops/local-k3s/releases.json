@@ -1,0 +1,28 @@
+{
+  "platform": "linux/amd64",
+  "backend": {
+    "sourceRevision": "2c2e05c7765a7481883936af6a8700028c085cea",
+    "image": "docker.io/library/platform-lab-backend@sha256:2db7b4fef29ee83dfc0aa5e5bba919f306064829b0217a6a12875065072df8cc",
+    "configDigest": "sha256:c159ec159e5a4ac80830a012de21bad5944cfd16c74339e5825b53c36bc0040e",
+    "archive": "platform-backend.tar",
+    "archiveSHA256": "d2703a6e81383ed72c3b64af7265d474bbb496940366bb3c79ebf9f42304ae3d"
+  },
+  "frontend": [
+    {
+      "releaseId": "gitops-a",
+      "sourceRevision": "2c2e05c7765a7481883936af6a8700028c085cea",
+      "image": "docker.io/library/platform-lab-frontend@sha256:26df98226d67ae71a5d3623abeecb43fefd636c4fe5569ed00fe95d880861565",
+      "configDigest": "sha256:1bbf4de1e329f005ca01e0d8a7185e2b9c1c30e8828b90433de1cab5746ff322",
+      "archive": "platform-frontend-a.tar",
+      "archiveSHA256": "a69359d82f964a63c369deccace7cebba43df80b64f8b1b40c807633669c11f3"
+    },
+    {
+      "releaseId": "gitops-b",
+      "sourceRevision": "2c2e05c7765a7481883936af6a8700028c085cea",
+      "image": "docker.io/library/platform-lab-frontend@sha256:1d24f1236e50db56127343c8818632834960c2f43026c34bcf211f891290b870",
+      "configDigest": "sha256:6195178b729bc5e898fbcee889ad0a87e6cfd08ee35ff27303d9e519ec0c4816",
+      "archive": "platform-frontend-b.tar",
+      "archiveSHA256": "a03a52fca62a0fae4eaeed3886b6269f1dc6c3a867e5591f4686ded74b51040f"
+    }
+  ]
+}
