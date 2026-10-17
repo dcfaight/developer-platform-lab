@@ -416,7 +416,7 @@ credentials are never sent ambiently by the browser.
 
 | Request | Requirement |
 |---|---|
-| Health probes (`/actuator/health/**`) | Anonymous; deployment exposure remains unchanged |
+| Health probes (`/actuator/health/liveness`, `/actuator/health/readiness`) | Anonymous; deployment exposure remains unchanged |
 | `GET /api/v1/me` | Any authenticated account; returns `{"username":"alice","roles":["DEVELOPER"],"teams":["payments"]}` |
 | Environment list/detail discovery | `OPERATOR`: all; `DEVELOPER`: only owned-team environments (including list rows and totals); `CLEANUP`: all, including legacy unowned rows |
 | Environment operation history and direct operation reads | `OPERATOR`: all; `DEVELOPER`: only environments owned by their teams; `CLEANUP`: denied |
@@ -440,7 +440,7 @@ performs no mutation:
 | Status | Code | Meaning |
 |---|---|---|
 | `401` | `UNAUTHENTICATED` | Missing, malformed, or wrong credentials. |
-| `403` | `FORBIDDEN` | Valid credentials without the required role. |
+| `403` | `FORBIDDEN` | Valid credentials without the required role or team access. |
 
 Both use the standard error body with `requestId` and the `X-Request-Id` header.
 `401` deliberately omits `WWW-Authenticate`, so browsers never show a native

@@ -101,6 +101,33 @@ class TeamAuthorizationIntegrationTests {
     }
 
     @Test
+    void loginCasingUsesConfiguredUsernameForMembershipAndReplayScope() throws Exception {
+        String authorization = TestUsers.basic(TestUsers.DEVELOPER.toUpperCase(java.util.Locale.ROOT),
+                TestUsers.password(TestUsers.DEVELOPER));
+        var identity = HTTP.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/api/v1/me"))
+                .timeout(Duration.ofSeconds(30)).header("Authorization", authorization).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, identity.statusCode(), identity.body());
+        var me = mapper.readTree(identity.body());
+        assertEquals(TestUsers.DEVELOPER, me.path("username").asText());
+        assertEquals(mapper.readTree("[\"team-a\"]"), me.path("teams"));
+
+        var original = create(TestUsers.DEVELOPER, "case-replay", "team-a");
+        assertEquals(202, original.status());
+        String body = mapper.writeValueAsString(Map.of("name", "Team preview",
+                "templateId", "sample-service", "ttlHours", 1, "teamId", "team-a"));
+        var replay = HTTP.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/api/v1/environments"))
+                .timeout(Duration.ofSeconds(30)).header("Authorization", authorization)
+                .header("Content-Type", "application/json").header("Idempotency-Key", "case-replay")
+                .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(202, replay.statusCode(), replay.body());
+        assertEquals(original.json(), mapper.readTree(replay.body()));
+        assertEquals(TestUsers.DEVELOPER + ":team-a",
+                jdbc.queryForObject("SELECT scope FROM idempotency_requests", String.class));
+        assertCounts(1);
+    }
+
+    @Test
     void replayReauthorizesCurrentPersistedOwnershipAndRejectsChangedTeamWithoutWrites() throws Exception {
         var original = create(TestUsers.DEVELOPER, "ownership-change", "team-a");
         assertEquals(202, original.status());
